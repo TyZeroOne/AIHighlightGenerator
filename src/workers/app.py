@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from celery import Celery
-from celery.signals import worker_process_init, worker_process_shutdown, worker_shutting_down
+from celery.signals import (
+    worker_process_init,
+    worker_process_shutdown,
+    worker_ready,
+    worker_shutting_down,
+)
 from kombu import Queue
 
 from core.config import get_settings
@@ -84,6 +90,30 @@ celery_app.conf.beat_schedule = {
     # Наполнится на Этапе 10; структура объявлена сразу, чтобы beat-контейнер
     # можно было поднять и проверить уже сейчас.
 }
+
+
+@worker_ready.connect
+def _warn_about_gpu_queue_on_cpu(**_: Any) -> None:
+    """Предупредить, что тяжёлые задачи пойдут на процессоре.
+
+    Воркер без видеокарты, слушающий очередь ``gpu``, — это штатная и нужная
+    конфигурация: иначе на машине без GPU распознавание речи выполнять
+    некому, и джоб зависает молча. Но выполняться оно будет впятеро дольше,
+    и это должно быть видно в логе, а не выясняться через полчаса ожидания.
+    """
+    queues = {name.strip() for name in os.environ.get("CELERY_QUEUES", "").split(",")}
+    if "gpu" not in queues:
+        return
+
+    from speech.whisper import resolve_device
+
+    if resolve_device(settings.device) != "cuda":
+        log.warning(
+            "worker.gpu_queue_without_cuda",
+            model=settings.whisper_model,
+            hint="распознавание речи пойдёт на CPU; поднимите профиль gpu "
+            "и сузьте WORKER_CPU_QUEUES до cpu,io",
+        )
 
 
 @worker_process_init.connect

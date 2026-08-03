@@ -38,7 +38,10 @@ x-app-env: &app-env
   # запуске: large-v3 — это 3 ГБ, поэтому том, а не слой образа.
   HF_HOME: /models
   DEVICE: ${DEVICE:-auto}
-  WHISPER_MODEL: ${WHISPER_MODEL:-large-v3}
+  # medium, а не large-v3: развёртывание по умолчанию — CPU-only, а там
+  # large-v3 обрабатывает час речи 30 минут против 17 при том же WER
+  # на разговорной речи. С видеокартой ставьте large-v3 явно.
+  WHISPER_MODEL: ${WHISPER_MODEL:-medium}
   WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-auto}
   WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-}
   WHISPER_CHUNK_SEC: ${WHISPER_CHUNK_SEC:-600}
@@ -118,7 +121,13 @@ services:
       dockerfile: docker/worker.Dockerfile
     environment:
       <<: *app-env
-      CELERY_QUEUES: cpu,io
+      # `gpu` в списке по умолчанию намеренно: развёртывание без видеокарты —
+      # основное, а распознавание речи маршрутизируется именно туда. Без этого
+      # задача уходит в очередь, которую никто не слушает, и джоб молча висит
+      # вечно — самый неприятный вид отказа.
+      # Подняли worker-gpu — сузьте до `cpu,io` через WORKER_CPU_QUEUES,
+      # иначе задачи будут случайно доставаться то CPU, то GPU.
+      CELERY_QUEUES: ${WORKER_CPU_QUEUES:-cpu,io,gpu}
       CELERY_CONCURRENCY: ${WORKER_CPU_CONCURRENCY:-4}
     volumes:
       - media:/media

@@ -40,6 +40,11 @@ __all__ = [
 #: сегментах — почти всегда петля на музыке или тишине.
 _LOOP_REPEATS: Final = 3
 
+#: Ниже этой средней логарифмической вероятности текст считается угаданным,
+#: а не расслышанным. Значение из референсной реализации Whisper: оно
+#: подобрано на их наборе, и своих замеров, чтобы его двигать, у нас нет.
+_LOGPROB_VETO: Final = -1.0
+
 _PUNCTUATION: Final = re.compile(r"[^\w\s]", re.UNICODE)
 _SPACES: Final = re.compile(r"\s+")
 
@@ -155,28 +160,40 @@ def drop_non_speech(
     transcript: Transcript,
     *,
     no_speech_threshold: float = 0.6,
-    min_avg_logprob: float | None = None,
+    logprob_threshold: float = _LOGPROB_VETO,
 ) -> Transcript:
     """Выбросить сегменты, в которых речи не было.
 
-    Три фильтра, от самого надёжного к самому грубому:
+    Три признака, и первый из них требует осторожности:
 
-    * ``no_speech_prob`` — оценка самой модели, ей стоит верить в первую очередь;
+    * **высокий ``no_speech_prob`` при низкой уверенности в тексте.** Оба
+      условия обязательны — почему, см. ниже;
     * пустой текст после нормализации — сегмент из одних знаков препинания;
     * зацикленный повтор одной строки — известный режим отказа декодера
       на музыке и длинной тишине.
 
-    ``min_avg_logprob`` по умолчанию выключен: он режет и настоящую тихую
-    речь, а на входе у нас фильмы, где шёпот — это содержание, а не помеха.
+    > ``no_speech_prob`` — оценка **тридцатисекундного окна декодирования**,
+    > а не отдельного сегмента. Все сегменты внутри окна наследуют одно
+    > и то же значение. Достаточно музыкальной отбивки в начале окна, чтобы
+    > оценка ушла к 0.74 — и наивный порог выбросит вместе с ней всю речь,
+    > которая идёт следом.
+    >
+    > Поэтому вторым условием стоит ``avg_logprob``: он относится уже
+    > к конкретному сегменту и говорит, насколько модель уверена в **тексте**.
+    > Уверенный текст в «шумном» окне — это речь, и трогать его нельзя.
+    > Так же устроен и референсный код Whisper.
+    >
+    > Найдено замером: на 59-секундном клипе с русской речью фильтр без
+    > второго условия удалял тридцать секунд подряд — шесть сегментов
+    > с ``no_speech=0.74`` и ``logprob=-0.17``, то есть текст, в котором
+    > модель была уверена почти полностью.
     """
     kept: list[TranscriptSegment] = []
     repeats = 0
     previous_key = ""
 
     for segment in transcript.segments:
-        if segment.no_speech_prob is not None and segment.no_speech_prob > no_speech_threshold:
-            continue
-        if min_avg_logprob is not None and (segment.avg_logprob or 0.0) < min_avg_logprob:
+        if _is_silence(segment, no_speech_threshold, logprob_threshold):
             continue
 
         key = _normalized(segment.text)
@@ -194,6 +211,20 @@ def drop_non_speech(
         kept.append(segment)
 
     return Transcript(segments=tuple(kept), language=transcript.language)
+
+
+def _is_silence(
+    segment: TranscriptSegment,
+    no_speech_threshold: float,
+    logprob_threshold: float,
+) -> bool:
+    """Речи в сегменте не было: и окно «молчит», и текст неуверенный."""
+    if segment.no_speech_prob is None or segment.no_speech_prob <= no_speech_threshold:
+        return False
+    # Уверенность неизвестна — доверяем оценке окна: другого признака нет.
+    if segment.avg_logprob is None:
+        return True
+    return segment.avg_logprob < logprob_threshold
 
 
 def normalize_words(

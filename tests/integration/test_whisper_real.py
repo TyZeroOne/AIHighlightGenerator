@@ -18,6 +18,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests.metrics import wer
 
 from core.domain.media import AudioTrack
 from speech.whisper import FasterWhisperTranscriber
@@ -36,37 +37,6 @@ pytestmark.append(
 REFERENCE = (
     "the quick brown fox jumps over the lazy dog while the cat sleeps on the warm window sill"
 )
-
-
-def words(text: str) -> list[str]:
-    cleaned = "".join(char if char.isalnum() or char.isspace() else " " for char in text.lower())
-    return cleaned.split()
-
-
-def wer(reference: str, hypothesis: str) -> float:
-    """Word Error Rate: расстояние Левенштейна по словам, делённое на эталон.
-
-    Своя реализация в пятнадцать строк вместо зависимости ``jiwer``: метрика
-    известна, кода в ней меньше, чем в описании пакета, а тянуть библиотеку
-    в тестовое окружение ради одной функции незачем.
-    """
-    source, target = words(reference), words(hypothesis)
-    if not source:
-        return 0.0 if not target else 1.0
-
-    previous = list(range(len(target) + 1))
-    for i, ref_word in enumerate(source, start=1):
-        current = [i]
-        for j, hyp_word in enumerate(target, start=1):
-            current.append(
-                min(
-                    previous[j] + 1,  # удаление
-                    current[j - 1] + 1,  # вставка
-                    previous[j - 1] + (ref_word != hyp_word),  # замена
-                )
-            )
-        previous = current
-    return previous[-1] / len(source)
 
 
 def _synthesize(path: Path, text: str, *, voice: str = "en") -> Path:

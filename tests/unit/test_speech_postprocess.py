@@ -34,12 +34,14 @@ def segment(
     text: str,
     *,
     no_speech: float | None = 0.05,
+    logprob: float | None = -0.3,
 ) -> TranscriptSegment:
     return TranscriptSegment(
         text=text,
         range=TimeRange(start, end),
         language="ru",
         no_speech_prob=no_speech,
+        avg_logprob=logprob,
     )
 
 
@@ -151,18 +153,54 @@ class TestMergeChunks:
 
 
 class TestDropNonSpeech:
-    def test_high_no_speech_probability_is_dropped(self) -> None:
-        """Оценка самой модели — самый надёжный признак, что речи не было."""
+    def test_high_no_speech_probability_with_low_confidence_is_dropped(self) -> None:
+        """Оба признака вместе: окно «молчит» и текст неуверенный."""
         transcript = Transcript(
             segments=(
                 segment(0.0, 2.0, "настоящая реплика", no_speech=0.05),
-                segment(2.0, 4.0, "Продолжение следует...", no_speech=0.95),
+                segment(2.0, 4.0, "Продолжение следует...", no_speech=0.95, logprob=-1.4),
             )
         )
 
         cleaned = drop_non_speech(transcript, no_speech_threshold=0.6)
 
         assert [seg.text for seg in cleaned.segments] == ["настоящая реплика"]
+
+    def test_confident_text_survives_a_noisy_window(self) -> None:
+        """Регрессия на реальный дефект.
+
+        ``no_speech_prob`` относится к **тридцатисекундному окну**, а не
+        к сегменту: все сегменты внутри окна получают одно значение.
+        Музыкальная отбивка в начале окна поднимает его до 0.74 — и наивный
+        порог выбрасывал вместе с ней всю следующую за ней речь.
+
+        Данные взяты с живого прогона: шесть сегментов подряд с ``0.74``
+        и ``logprob=-0.17`` — тридцать секунд текста, в котором модель
+        была уверена почти полностью.
+        """
+        transcript = Transcript(
+            segments=tuple(
+                segment(
+                    23.0 + index * 5,
+                    28.0 + index * 5,
+                    f"реплика {index}",
+                    no_speech=0.74,
+                    logprob=-0.17,
+                )
+                for index in range(6)
+            )
+        )
+
+        cleaned = drop_non_speech(transcript, no_speech_threshold=0.6)
+
+        assert len(cleaned.segments) == 6, "уверенный текст нельзя выбрасывать"
+
+    def test_unknown_confidence_falls_back_to_the_window(self) -> None:
+        """Реализация без ``avg_logprob`` — оценка окна остаётся единственным
+        признаком, и доверять приходится ей."""
+        transcript = Transcript(segments=(segment(0.0, 2.0, "шум", no_speech=0.95, logprob=None),))
+
+        assert not drop_non_speech(transcript).segments
 
     def test_empty_and_punctuation_only_segments_are_dropped(self) -> None:
         transcript = Transcript(
@@ -198,8 +236,9 @@ class TestDropNonSpeech:
 
         assert len(cleaned.segments) == 2
 
-    def test_min_avg_logprob_is_off_by_default(self) -> None:
-        """В фильмах шёпот — это содержание, а не помеха; резать его нельзя."""
+    def test_quiet_speech_in_a_speaking_window_survives(self) -> None:
+        """Шёпот в фильме — это содержание, а не помеха. Низкая уверенность
+        сама по себе не повод выбрасывать: окно-то говорит."""
         quiet = TranscriptSegment(
             text="еле слышно",
             range=TimeRange(0.0, 2.0),
@@ -208,7 +247,6 @@ class TestDropNonSpeech:
         )
 
         assert len(drop_non_speech(Transcript(segments=(quiet,))).segments) == 1
-        assert not drop_non_speech(Transcript(segments=(quiet,)), min_avg_logprob=-1.0).segments
 
 
 class TestNormalizeWords:

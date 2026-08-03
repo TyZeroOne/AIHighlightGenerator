@@ -137,6 +137,23 @@ class TestConfiguration:
 
         assert route["queue"].name == "io"
 
+    def test_every_routed_queue_is_declared(self) -> None:
+        """Маршрут в необъявленную очередь — это задача, которую никто
+        не заберёт. Отказ при этом молчаливый: сообщение просто лежит
+        в брокере, а джоб висит в «выполняется» до скончания века.
+
+        Проверка дешёвая и ловит опечатку в имени очереди — а именно так
+        такие вещи и появляются.
+        """
+        declared = {queue.name for queue in celery_app.conf.task_queues}
+        routed = {
+            route["queue"]
+            for route in celery_app.conf.task_routes.values()
+            if isinstance(route, dict) and "queue" in route
+        }
+
+        assert routed <= declared, f"нет таких очередей: {sorted(routed - declared)}"
+
 
 class TestPipelineTask:
     def test_retries_only_transient_errors(self) -> None:
