@@ -1,0 +1,382 @@
+"""Композиционный корень.
+
+Единственное место в проекте, где конкретные классы связываются с портами.
+Всё остальное работает с интерфейсами и не знает, что за ними стоит.
+
+Контейнер растёт вместе с проектом: на Этапе 1 здесь была только
+инфраструктура, на Этапе 2 добавились хранилище, ffprobe, провайдеры
+источников и сценарии загрузки. Важно, что добавление происходит здесь
+и только здесь — сценарии и API не меняются.
+"""
+
+from __future__ import annotations
+
+from functools import cached_property
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+from uuid import UUID
+
+from core import registry
+from core.config import Settings, get_settings
+from core.domain.errors import DependencyResolutionError
+from core.infra.db.session import create_engine, create_session_factory
+from core.infra.db.uow import SqlAlchemyUnitOfWork
+from core.logging import configure_logging, get_logger
+from core.ports.media import AudioExtractor, KeyframeExtractor, SceneDetector
+from core.ports.repository import UnitOfWork
+from core.ports.source import MediaProbe, SourceProvider
+from core.ports.speech import Transcriber
+from core.ports.storage import ObjectStorage
+from core.usecases.chunked_upload import (
+    ChunkedUploadLimits,
+    CompleteChunkedUpload,
+    InitChunkedUpload,
+    UploadPart,
+)
+from core.usecases.detect_scenes import DetectScenes, SceneDetectionSettings
+from core.usecases.transcribe import ExtractAudio, Transcribe
+from core.usecases.upload_video import (
+    DeleteVideo,
+    GetVideo,
+    ListVideos,
+    RegisterLocalVideo,
+    UploadVideo,
+    VideoLimits,
+)
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+__all__ = ["Container", "get_container", "reset_container"]
+
+log = get_logger(__name__)
+
+
+class Container:
+    """Ленивый контейнер зависимостей.
+
+    ``cached_property`` вместо создания всего в ``__init__``: движок БД
+    не нужен процессу, который выполняет только CPU-задачу, а модель Whisper
+    незачем грузить в API-процессе. Ресурс создаётся при первом обращении.
+    """
+
+    def __init__(self, settings: Settings | None = None) -> None:
+        self.settings = settings or get_settings()
+        configure_logging(level=self.settings.log_level, fmt=self.settings.log_format)
+        registry.discover()
+        log.debug(
+            "container.initialized",
+            env=self.settings.app_env,
+            storage=self.settings.storage_backend,
+            analyzers=sorted(registry.get_analyzers()),
+            sources=sorted(registry.get_source_providers()),
+        )
+
+    # ------------------------------------------------------------ БД
+    @cached_property
+    def engine(self) -> AsyncEngine:
+        return create_engine(self.settings)
+
+    @cached_property
+    def session_factory(self) -> async_sessionmaker[AsyncSession]:
+        return create_session_factory(self.engine)
+
+    def uow(self) -> UnitOfWork:
+        """Фабрика Unit of Work.
+
+        Метод, а не свойство: каждый вызов обязан давать **новый** UoW
+        со своей сессией. Общий UoW на несколько запросов означал бы общую
+        транзакцию — и откат одного запроса ронял бы чужие изменения.
+        """
+        return SqlAlchemyUnitOfWork(self.session_factory)
+
+    # ------------------------------------------------------ хранилище
+    @cached_property
+    def storage(self) -> ObjectStorage:
+        if self.settings.storage_backend == "s3":
+            from core.infra.storage.s3 import S3Storage
+
+            return S3Storage(
+                bucket=self.settings.s3_bucket,
+                endpoint_url=self.settings.s3_endpoint_url,
+                public_endpoint_url=self.settings.s3_public_endpoint_url,
+                access_key=self.settings.s3_access_key,
+                secret_key=self.settings.s3_secret_key,
+                signed_url_ttl=self.settings.s3_signed_url_ttl,
+            )
+
+        from core.infra.storage.local import LocalStorage
+
+        return LocalStorage(self.settings.storage_local_root)
+
+    @cached_property
+    def workdir(self) -> Path:
+        """Каталог для временных файлов: приём загрузок, сборка частей.
+
+        Отдельно от хранилища: это рабочая область процесса, а не общие данные.
+        """
+        path = Path(self.settings.workdir)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    # ---------------------------------------------------------- медиа
+    @cached_property
+    def probe(self) -> MediaProbe:
+        from video_loader.probe import FFprobe
+
+        return FFprobe(self.settings.ffprobe_bin)
+
+    @cached_property
+    def local_file_provider(self) -> SourceProvider:
+        from video_loader.providers.local import LocalFileProvider
+
+        return LocalFileProvider(self.probe, self.settings.local_source_roots)
+
+    @cached_property
+    def upload_provider(self) -> SourceProvider:
+        from video_loader.providers.upload import UploadProvider
+
+        return UploadProvider(
+            self.storage,
+            self.probe,
+            key_resolver=self._resolve_storage_key,
+            workdir=self.workdir,
+        )
+
+    @cached_property
+    def source_providers(self) -> tuple[SourceProvider, ...]:
+        """Все провайдеры, которых умеет собрать этот процесс.
+
+        Порядок важен: первый, ответивший ``supports()``, и будет выбран.
+        """
+        return (self.upload_provider, self.local_file_provider)
+
+    def resolve_provider(self, uri: str) -> SourceProvider:
+        """Провайдер под конкретный URI.
+
+        Сценарии получают эту функцию, а не реестр и не список: им нужно
+        «дай, чем открыть вот это», а не знание о том, какие провайдеры
+        вообще существуют.
+        """
+        for provider in self.source_providers:
+            if provider.supports(uri):
+                return provider
+        raise DependencyResolutionError(f"Нет источника для URI: {uri!r}", uri=uri)
+
+    @cached_property
+    def scene_detector(self) -> SceneDetector:
+        """Детектор сцен по конфигу.
+
+        Обе реализации взаимозаменяемы (проверяется одним и тем же набором
+        тестов через порт), поэтому выбор — строчка в ``.env``, а не ветвление
+        где-то в конвейере.
+        """
+        if self.settings.scene_detector == "ffmpeg":
+            from video_loader.scenes.ffmpeg import FFmpegSceneDetector
+
+            return FFmpegSceneDetector(
+                binary=self.settings.ffmpeg_bin,
+                threshold=self.settings.scene_threshold,
+                min_len_sec=self.settings.scene_min_len_sec,
+                max_len_sec=self.settings.scene_max_len_sec,
+            )
+
+        from video_loader.scenes.pyscenedetect import PySceneDetectDetector
+
+        return PySceneDetectDetector(
+            threshold=self.settings.scene_threshold,
+            min_len_sec=self.settings.scene_min_len_sec,
+            max_len_sec=self.settings.scene_max_len_sec,
+            downscale=self.settings.scene_downscale,
+        )
+
+    @cached_property
+    def audio_extractor(self) -> AudioExtractor:
+        from audio.extractor import FFmpegAudioExtractor
+
+        return FFmpegAudioExtractor(
+            binary=self.settings.ffmpeg_bin,
+            workdir=self.workdir,
+            sample_rate=self.settings.audio_sample_rate,
+            channels=self.settings.audio_channels,
+        )
+
+    @cached_property
+    def keyframe_extractor(self) -> KeyframeExtractor:
+        from video_loader.scenes.keyframes import FFmpegKeyframeExtractor
+
+        return FFmpegKeyframeExtractor(
+            binary=self.settings.ffmpeg_bin,
+            width=self.settings.scene_keyframe_width,
+            max_parallel=self.settings.scene_keyframe_workers,
+        )
+
+    async def _resolve_storage_key(self, video_id: UUID) -> str:
+        """`video_id` → ключ в хранилище.
+
+        Провайдеру нужен ключ, но ходить в БД он не должен — иначе адаптер
+        медиа начал бы зависеть от адаптера БД. Мост между ними строит
+        контейнер: это ровно его работа.
+        """
+        from core.domain.errors import NotFoundError
+
+        async with self.uow() as uow:
+            video = await uow.videos.get(video_id)
+        if video is None:
+            raise NotFoundError("Видео не найдено", video_id=str(video_id))
+        return video.storage_key
+
+    # ------------------------------------------------------- лимиты
+    @cached_property
+    def video_limits(self) -> VideoLimits:
+        return VideoLimits(
+            allowed_containers=self.settings.allowed_containers_set,
+            max_duration_sec=self.settings.max_duration_sec,
+            max_bytes=self.settings.max_upload_bytes,
+        )
+
+    @cached_property
+    def chunked_limits(self) -> ChunkedUploadLimits:
+        return ChunkedUploadLimits(
+            max_bytes=self.settings.max_upload_bytes,
+            allowed_containers=self.settings.allowed_containers_set,
+            chunk_size=self.settings.upload_chunk_size,
+        )
+
+    # ------------------------------------------------------ сценарии
+    @cached_property
+    def upload_video(self) -> UploadVideo:
+        return UploadVideo(
+            uow_factory=self.uow,
+            storage=self.storage,
+            probe=self.probe,
+            limits=self.video_limits,
+        )
+
+    @cached_property
+    def register_local_video(self) -> RegisterLocalVideo:
+        return RegisterLocalVideo(
+            uow_factory=self.uow,
+            provider=self.local_file_provider,
+            limits=self.video_limits,
+        )
+
+    @cached_property
+    def get_video(self) -> GetVideo:
+        return GetVideo(uow_factory=self.uow)
+
+    @cached_property
+    def list_videos(self) -> ListVideos:
+        return ListVideos(uow_factory=self.uow)
+
+    @cached_property
+    def delete_video(self) -> DeleteVideo:
+        return DeleteVideo(uow_factory=self.uow, storage=self.storage)
+
+    @cached_property
+    def init_chunked_upload(self) -> InitChunkedUpload:
+        return InitChunkedUpload(uow_factory=self.uow, limits=self.chunked_limits)
+
+    @cached_property
+    def upload_part(self) -> UploadPart:
+        return UploadPart(
+            uow_factory=self.uow,
+            storage=self.storage,
+            limits=self.chunked_limits,
+            workdir=self.workdir,
+        )
+
+    @cached_property
+    def complete_chunked_upload(self) -> CompleteChunkedUpload:
+        return CompleteChunkedUpload(
+            uow_factory=self.uow,
+            storage=self.storage,
+            upload_video=self.upload_video,
+            workdir=self.workdir,
+        )
+
+    @cached_property
+    def detect_scenes(self) -> DetectScenes:
+        return DetectScenes(
+            uow_factory=self.uow,
+            detector=self.scene_detector,
+            keyframes=self.keyframe_extractor,
+            storage=self.storage,
+            provider_resolver=self.resolve_provider,
+            workdir=self.workdir,
+            settings=SceneDetectionSettings(
+                keyframes_enabled=self.settings.scene_keyframes_enabled,
+            ),
+        )
+
+    @cached_property
+    def transcriber(self) -> Transcriber:
+        """Распознавание речи.
+
+        Модель тяжёлая (large-v3 — три гигабайта), поэтому создаётся лениво
+        и живёт до конца процесса: загружать её на каждую задачу означало бы
+        тратить на инициализацию больше, чем на работу.
+        """
+        from speech.whisper import FasterWhisperTranscriber
+
+        return FasterWhisperTranscriber(
+            model_size=self.settings.whisper_model,
+            device=self.settings.device,
+            compute_type=self.settings.whisper_compute_type,
+            beam_size=self.settings.whisper_beam_size,
+            use_vad=self.settings.whisper_vad,
+            language=self.settings.whisper_language or None,
+            no_speech_threshold=self.settings.whisper_no_speech_threshold,
+            chunk_sec=self.settings.whisper_chunk_sec,
+            chunk_overlap_sec=self.settings.whisper_chunk_overlap_sec,
+            batch_size=self.settings.whisper_batch_size,
+        )
+
+    @cached_property
+    def extract_audio(self) -> ExtractAudio:
+        return ExtractAudio(
+            uow_factory=self.uow,
+            extractor=self.audio_extractor,
+            storage=self.storage,
+            provider_resolver=self.resolve_provider,
+        )
+
+    @cached_property
+    def transcribe(self) -> Transcribe:
+        return Transcribe(
+            uow_factory=self.uow,
+            transcriber=self.transcriber,
+            storage=self.storage,
+            workdir=self.workdir,
+            language=self.settings.whisper_language or None,
+            sample_rate=self.settings.audio_sample_rate,
+            channels=self.settings.audio_channels,
+        )
+
+    # ------------------------------------------------------- Этап 6+
+    @cached_property
+    def llm(self) -> Any:
+        raise NotImplementedError("LLMProvider будет реализован на Этапе 6")
+
+    # ------------------------------------------------------ жизненный цикл
+    async def aclose(self) -> None:
+        """Аккуратно закрыть ресурсы при остановке процесса."""
+        if "engine" in self.__dict__:
+            await self.engine.dispose()
+
+
+_container: Container | None = None
+
+
+def get_container() -> Container:
+    """Синглтон контейнера на процесс."""
+    global _container
+    if _container is None:
+        _container = Container()
+    return _container
+
+
+def reset_container() -> None:
+    """Сброс. Нужен тестам, чтобы подменить настройки."""
+    global _container
+    _container = None

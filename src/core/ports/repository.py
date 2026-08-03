@@ -1,0 +1,244 @@
+"""Порты репозиториев и Unit of Work.
+
+Repository прячет способ хранения: сценарий говорит «дай мне видео по
+контрольной сумме», а не «сделай SELECT». Unit of Work объединяет несколько
+операций в одну транзакцию: либо сохранились и видео, и его артефакт,
+либо ничего.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from types import TracebackType
+from typing import Protocol, Self
+from uuid import UUID
+
+from core.domain.entities import Clip, Job, Scene, UploadSession, User, Video
+from core.domain.enums import AssetKind, AssetOwnerType, JobStatus
+from core.domain.media import Transcript
+
+__all__ = [
+    "AssetRecord",
+    "AssetRepositoryPort",
+    "ClipRepository",
+    "JobRepository",
+    "SceneRepository",
+    "TranscriptRepository",
+    "UnitOfWork",
+    "UnitOfWorkFactory",
+    "UploadSessionRepository",
+    "UserRepository",
+    "VideoRepository",
+]
+
+
+class AssetRecord(Protocol):
+    """Минимум, который сценариям нужно знать об артефакте.
+
+    Не полная ORM-строка: сценарию не нужны ни `deleted_at`, ни связи.
+    Узкий протокол = меньше поводов утечь деталям хранения наверх.
+    """
+
+    id: UUID
+    kind: AssetKind
+    storage_key: str
+    mime: str
+    size_bytes: int
+
+
+class UserRepository(Protocol):
+    async def get(self, user_id: UUID) -> User | None: ...
+    async def get_by_email(self, email: str) -> User | None: ...
+    async def get_by_api_key_hash(self, key_hash: str) -> User | None: ...
+    async def create(
+        self, *, email: str, api_key_hash: str, password_hash: str | None = None
+    ) -> User: ...
+
+
+class VideoRepository(Protocol):
+    async def add(self, video: Video) -> Video: ...
+    async def get(self, video_id: UUID) -> Video | None: ...
+
+    async def get_owned(self, video_id: UUID, user_id: UUID) -> Video | None:
+        """Видео конкретного пользователя.
+
+        Проверка владения зашита в запрос намеренно: если бы существовал
+        только ``get()``, рано или поздно кто-нибудь забыл бы сверить
+        ``video.user_id`` — и появился бы доступ к чужим данным.
+        """
+        ...
+
+    async def get_by_checksum(self, user_id: UUID, checksum: str) -> Video | None: ...
+    async def list_for_user(
+        self, user_id: UUID, *, limit: int = 50, offset: int = 0
+    ) -> Sequence[Video]: ...
+    async def count_for_user(self, user_id: UUID) -> int: ...
+    async def update(self, video: Video) -> Video: ...
+    async def mark_deleted(self, video_id: UUID) -> None: ...
+
+
+class AssetRepositoryPort(Protocol):
+    async def add(
+        self,
+        *,
+        owner_type: AssetOwnerType,
+        owner_id: UUID,
+        kind: AssetKind,
+        storage_key: str,
+        mime: str = "application/octet-stream",
+        size_bytes: int = 0,
+        meta: dict[str, object] | None = None,
+        checksum: str | None = None,
+        ttl_hours: int | None = None,
+    ) -> UUID: ...
+
+    async def list_for_owner(
+        self, owner_type: AssetOwnerType, owner_id: UUID
+    ) -> Sequence[AssetRecord]: ...
+    async def delete_for_owner(self, owner_type: AssetOwnerType, owner_id: UUID) -> None: ...
+
+
+class UploadSessionRepository(Protocol):
+    async def create(
+        self,
+        *,
+        user_id: UUID,
+        filename: str,
+        chunk_size: int,
+        total_size: int | None,
+        ttl_hours: int = 24,
+    ) -> UploadSession: ...
+
+    async def get_owned(self, upload_id: UUID, user_id: UUID) -> UploadSession | None: ...
+    async def register_part(
+        self, upload_id: UUID, part_number: int, size: int
+    ) -> UploadSession: ...
+    async def complete(self, upload_id: UUID, video_id: UUID) -> None: ...
+    async def delete(self, upload_id: UUID) -> None: ...
+
+
+class JobRepository(Protocol):
+    async def add(self, job: Job) -> Job: ...
+    async def get(self, job_id: UUID) -> Job | None: ...
+
+    async def find_succeeded(self, video_id: UUID, params_hash: str) -> Job | None:
+        """Основа идемпотентности ``POST /analyze`` (док 04, §4.6)."""
+        ...
+
+    async def update(self, job: Job) -> Job: ...
+    async def list_by_status(self, status: JobStatus, *, limit: int) -> Sequence[Job]: ...
+
+
+class SceneRepository(Protocol):
+    async def bulk_add(self, scenes: Sequence[Scene]) -> None:
+        """Массовая вставка: сцен бывают тысячи, по одной — недопустимо медленно."""
+        ...
+
+    async def list_for_job(self, job_id: UUID) -> Sequence[Scene]: ...
+    async def count_for_job(self, job_id: UUID) -> int: ...
+
+    async def delete_for_job(self, job_id: UUID) -> None:
+        """Убрать сцены джоба перед повторным разбиением.
+
+        Нужно ради идемпотентности: у таблицы уникальный индекс
+        ``(job_id, index)``, и повторный прогон этапа без очистки упёрся бы
+        в конфликт вместо того, чтобы честно переписать результат.
+        """
+        ...
+
+    async def bulk_update(self, scenes: Sequence[Scene]) -> None:
+        """Обновить изменяемую часть сцен: признаки, скоры, текст.
+
+        Один метод на всё перечисленное, а не три: обновления идут пачками
+        по тысяче сцен, и каждый отдельный метод означал бы ещё один проход
+        по таблице ради одной колонки.
+        """
+        ...
+
+    async def top_by_score(self, job_id: UUID, *, limit: int) -> Sequence[Scene]: ...
+
+
+class TranscriptRepository(Protocol):
+    async def replace_for_job(self, job_id: UUID, transcript: Transcript, video_id: UUID) -> int:
+        """Записать транскрипт джоба целиком, заменив прежний.
+
+        Именно «заменить», а не «добавить»: этап может выполниться повторно
+        (``acks_late``, ретрай с этапа), и дописывание дало бы каждому слову
+        по второму экземпляру. Возвращает число записанных сегментов.
+        """
+        ...
+
+    async def get_for_job(self, job_id: UUID) -> Transcript: ...
+    async def count_for_job(self, job_id: UUID) -> int: ...
+
+
+class ClipRepository(Protocol):
+    async def bulk_add(self, clips: Sequence[Clip]) -> None: ...
+    async def get(self, clip_id: UUID) -> Clip | None: ...
+    async def list_for_job(self, job_id: UUID) -> Sequence[Clip]: ...
+    async def update(self, clip: Clip) -> Clip: ...
+
+
+class UnitOfWork(Protocol):
+    """Транзакционная граница.
+
+    Использование::
+
+        async with uow_factory() as uow:
+            await uow.videos.add(video)
+            await uow.assets.add(...)
+            await uow.commit()
+
+    Без явного ``commit()`` выход из контекста делает ``rollback()`` —
+    так забытый коммит превращается в отсутствие записи, а не в частичную.
+    """
+
+    # Репозитории объявлены свойствами, а не атрибутами, и это не стиль.
+    # Изменяемый атрибут в Protocol **инвариантен**: реализация обязана иметь
+    # ровно объявленный тип, и `assets: AssetRepository` не подошёл бы под
+    # `assets: AssetRepositoryPort`, хотя реализует его полностью.
+    # Свойство доступно только на чтение и потому ковариантно — подтип годится.
+    # Обычный атрибут в реализации свойству протокола соответствует.
+    @property
+    def users(self) -> UserRepository: ...
+
+    @property
+    def videos(self) -> VideoRepository: ...
+
+    @property
+    def assets(self) -> AssetRepositoryPort: ...
+
+    @property
+    def uploads(self) -> UploadSessionRepository: ...
+
+    @property
+    def jobs(self) -> JobRepository: ...
+
+    @property
+    def scenes(self) -> SceneRepository: ...
+
+    @property
+    def transcripts(self) -> TranscriptRepository: ...
+
+    async def __aenter__(self) -> Self: ...
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None: ...
+
+    async def commit(self) -> None: ...
+
+    async def rollback(self) -> None: ...
+
+
+class UnitOfWorkFactory(Protocol):
+    """Фабрика UoW.
+
+    Сценарий получает фабрику, а не готовый UoW: он сам решает, где проходит
+    граница транзакции, и может открыть несколько последовательных.
+    """
+
+    def __call__(self) -> UnitOfWork: ...

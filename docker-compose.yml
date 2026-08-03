@@ -1,0 +1,230 @@
+# Профили Compose:
+#   (по умолчанию)  api + worker-cpu + postgres + redis
+#   --profile gpu   + worker-gpu
+#   --profile net   + worker-net (отдельная очередь под LLM, Этап 6)
+#   --profile tools + flower + beat
+#
+#   docker compose up -d --build
+#   docker compose --profile tools up -d
+
+name: highlight-generator
+
+x-app-env: &app-env
+  APP_ENV: ${APP_ENV:-dev}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  LOG_FORMAT: ${LOG_FORMAT:-json}
+  SECRET_KEY: ${SECRET_KEY:-dev-insecure-change-me}
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: 5432
+  POSTGRES_DB: ${POSTGRES_DB:-highlights}
+  POSTGRES_USER: ${POSTGRES_USER:-hg}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hg-dev-password}
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/1
+  CELERY_RESULT_BACKEND: redis://redis:6379/2
+  STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
+  STORAGE_LOCAL_ROOT: /media
+  WORKDIR: /tmp/highlight-generator
+  S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
+  # Адрес, по которому за файлом пойдёт клиент. Отличается от внутреннего,
+  # и это принципиально: хост входит в подпись presigned-ссылки.
+  S3_PUBLIC_ENDPOINT_URL: ${S3_PUBLIC_ENDPOINT_URL:-http://localhost:9000}
+  S3_BUCKET: ${S3_BUCKET:-highlights}
+  S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+  S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
+  LOCAL_SOURCE_ROOTS_RAW: ${LOCAL_SOURCE_ROOTS_RAW:-/media/in}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  # Распознавание речи (Этап 4). Веса качаются в том models при первом
+  # запуске: large-v3 — это 3 ГБ, поэтому том, а не слой образа.
+  HF_HOME: /models
+  DEVICE: ${DEVICE:-auto}
+  WHISPER_MODEL: ${WHISPER_MODEL:-large-v3}
+  WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-auto}
+  WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-}
+  WHISPER_CHUNK_SEC: ${WHISPER_CHUNK_SEC:-600}
+  WHISPER_BATCH_SIZE: ${WHISPER_BATCH_SIZE:-0}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-highlights}
+      POSTGRES_USER: ${POSTGRES_USER:-hg}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hg-dev-password}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT_HOST:-5432}:5432"
+    healthcheck:
+      # Именно pg_isready, а не «порт открыт»: порт слушается раньше,
+      # чем БД готова принимать запросы, и миграции падают на гонке.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hg} -d ${POSTGRES_DB:-highlights}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # Без политики перезапуска БД не поднимется после перезагрузки хоста
+    # или сбоя Docker, а приложение — поднимется (у него политика есть)
+    # и будет бесконечно падать на подключении. Проверено на практике.
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    ports:
+      - "${REDIS_PORT_HOST:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # Одноразовый контейнер миграций. Отдельно от api намеренно: при нескольких
+  # репликах api миграции в его entrypoint устроили бы гонку.
+  migrate:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    environment: *app-env
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    environment: *app-env
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - media:/media
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  worker-cpu:
+    build:
+      context: .
+      dockerfile: docker/worker.Dockerfile
+    environment:
+      <<: *app-env
+      CELERY_QUEUES: cpu,io
+      CELERY_CONCURRENCY: ${WORKER_CPU_CONCURRENCY:-4}
+    volumes:
+      - media:/media
+      - models:/models
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # Даём воркеру время доделать задачу перед остановкой. Вместе с acks_late
+    # это означает: либо задача завершится, либо вернётся в очередь целой.
+    stop_grace_period: 120s
+    restart: unless-stopped
+
+  worker-gpu:
+    profiles: ["gpu"]
+    build:
+      context: .
+      # Отдельный образ поверх CUDA-рантайма: CPU-воркеру эти 3 ГБ не нужны.
+      dockerfile: docker/worker-gpu.Dockerfile
+    environment:
+      <<: *app-env
+      CELERY_QUEUES: gpu
+      CELERY_CONCURRENCY: ${WORKER_GPU_CONCURRENCY:-1}
+      DEVICE: cuda
+    volumes:
+      - media:/media
+      - models:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      redis:
+        condition: service_healthy
+    stop_grace_period: 120s
+    restart: unless-stopped
+
+  worker-net:
+    profiles: ["net"]
+    build:
+      context: .
+      dockerfile: docker/worker.Dockerfile
+    environment:
+      <<: *app-env
+      CELERY_QUEUES: net
+      CELERY_CONCURRENCY: ${WORKER_NET_CONCURRENCY:-4}
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  beat:
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: docker/worker.Dockerfile
+    environment: *app-env
+    command: ["beat"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # S3-совместимое хранилище для локальной разработки и тестов.
+  # Профиль отдельный: по умолчанию хватает локальной ФС, а MinIO нужен,
+  # только когда проверяешь именно S3-путь.
+  minio:
+    profiles: ["s3"]
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadmin}
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  flower:
+    profiles: ["tools"]
+    image: mher/flower:2.0
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/1
+      FLOWER_PORT: 5555
+    ports:
+      - "${FLOWER_PORT:-5555}:5555"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
+  media:
+  models:
+  miniodata:

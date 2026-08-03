@@ -1,0 +1,244 @@
+"""Конфигурация приложения.
+
+Один источник правды на все процессы. Читается из переменных окружения
+и файла ``.env``, валидируется Pydantic при старте: процесс с некорректным
+конфигом не поднимется вообще, вместо того чтобы упасть через час работы
+на строке ``int(os.environ["FOO"])``.
+"""
+
+from __future__ import annotations
+
+from enum import StrEnum
+from functools import lru_cache
+from pathlib import Path
+from typing import Literal
+
+from pydantic import Field, PostgresDsn, RedisDsn, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+__all__ = ["AppEnv", "Settings", "get_settings"]
+
+
+class AppEnv(StrEnum):
+    DEV = "dev"
+    STAGING = "staging"
+    PROD = "prod"
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",  # лишние переменные в окружении — не повод падать
+        case_sensitive=False,
+    )
+
+    # --- приложение ---
+    app_env: AppEnv = AppEnv.DEV
+    log_level: str = "INFO"
+    log_format: Literal["json", "console"] = "console"
+    secret_key: str = "dev-insecure-change-me"
+
+    # --- база данных ---
+    postgres_host: str = "postgres"
+    postgres_port: int = 5432
+    postgres_db: str = "highlights"
+    postgres_user: str = "hg"
+    postgres_password: str = "hg-dev-password"
+    db_pool_size: int = 10
+    db_max_overflow: int = 20
+    db_echo: bool = False
+
+    # --- redis / celery ---
+    redis_url: RedisDsn = Field(default="redis://redis:6379/0")  # type: ignore[assignment]
+    celery_broker_url: str = "redis://redis:6379/1"
+    celery_result_backend: str = "redis://redis:6379/2"
+    celery_task_time_limit: int = 3600
+
+    # --- хранилище ---
+    storage_backend: Literal["local", "s3"] = "local"
+    storage_local_root: Path = Path("/media")
+    s3_endpoint_url: str | None = None
+    #: Адрес хранилища, видимый КЛИЕНТУ. Отличается от внутреннего, когда
+    #: сервер ходит в S3 по адресу docker-сети, а браузер — по публичному
+    #: домену. Хост входит в подпись presigned-ссылки, поэтому подписывать
+    #: её нужно для того адреса, по которому пойдёт клиент.
+    s3_public_endpoint_url: str | None = None
+    s3_bucket: str = "highlights"
+    s3_access_key: str | None = None
+    s3_secret_key: str | None = None
+    s3_signed_url_ttl: int = 900
+
+    # --- медиа ---
+    ffmpeg_bin: str = "ffmpeg"
+    ffprobe_bin: str = "ffprobe"
+    max_upload_bytes: int = 20 * 1024**3
+    max_duration_sec: int = 6 * 3600
+    allowed_containers: str = "mp4,mkv,mov"
+    upload_chunk_size: int = 32 * 1024 * 1024
+    workdir: Path = Path("/tmp/highlight-generator")
+    #: Каталоги, из которых разрешено регистрировать локальные файлы.
+    #: Пустой список означает «нельзя ниоткуда»: включать эту возможность
+    #: нужно осознанно, иначе `file:///etc/passwd` станет валидным запросом.
+    local_source_roots_raw: str = ""
+
+    # --- детекция сцен ---
+    scene_detector: Literal["pyscenedetect", "ffmpeg"] = "pyscenedetect"
+    #: Порог различия соседних кадров в шкале PySceneDetect (0..255).
+    #: Для ffmpeg-детектора пересчитывается в проценты внутри адаптера:
+    #: у фильтра scdet своя шкала 0..100, и общий конфиг иначе означал бы
+    #: разную чувствительность у двух «взаимозаменяемых» реализаций.
+    scene_threshold: float = 27.0
+    scene_min_len_sec: float = 1.5
+    #: Верхняя граница длительности сцены. Статичный план на 12 минут —
+    #: это не «одна сцена», а кусок, внутри которого искать нечего:
+    #: скоринг усреднит признаки по всему отрезку и утопит любой всплеск.
+    scene_max_len_sec: float = 90.0
+    #: Кадры, с которых считается разница. 0 = отдать решение детектору
+    #: (PySceneDetect сам уменьшает большие кадры). Значение > 1 ускоряет
+    #: обработку кратно, ценой пропуска мелких деталей.
+    scene_downscale: int = 0
+    scene_keyframes_enabled: bool = True
+    scene_keyframe_width: int = 640
+    #: Сколько кадров тянуть из файла параллельно. Каждый кадр — отдельный
+    #: запуск ffmpeg с быстрой перемоткой; на тысяче сцен последовательный
+    #: цикл занимает минуты, а параллельный укладывается в десятки секунд.
+    scene_keyframe_workers: int = 8
+
+    # --- аудио ---
+    #: 16 кГц — не «качество похуже», а формат, на котором обучался Whisper.
+    #: Подавать 48 кГц бессмысленно: модель всё равно ресемплит вниз.
+    audio_sample_rate: int = 16000
+    audio_channels: int = 1
+
+    # --- модели и распознавание речи ---
+    device: Literal["auto", "cpu", "cuda"] = "auto"
+    whisper_model: str = "large-v3"
+    #: ``auto`` — float16 на GPU, int8 на CPU. Явное ``float16`` на процессоре
+    #: не ошибка конфигурации, но плохая идея: CTranslate2 молча откатится
+    #: на float32 и будет считать вчетверо дольше, чем в int8.
+    whisper_compute_type: str = "auto"
+    whisper_beam_size: int = 5
+    whisper_vad: bool = True
+    #: Порог вероятности «здесь нет речи», выше которого сегмент выбрасывается.
+    #: Музыка и шум дают у Whisper уверенные галлюцинации — «Продолжение следует...»,
+    #: «Субтитры сделал DimaTorzok». Без фильтра они попадут в скоринг как речь.
+    whisper_no_speech_threshold: float = 0.6
+    #: Язык распознавания; пусто — автоопределение по первым секундам.
+    whisper_language: str = ""
+    #: Длина куска, которым файл скармливается модели, и перекрытие кусков.
+    #: 0 — не резать вовсе (модель сама пройдёт файл целиком).
+    whisper_chunk_sec: float = 600.0
+    whisper_chunk_overlap_sec: float = 2.0
+    #: Сколько окон модель обрабатывает за один проход. 0 — решает устройство:
+    #: на GPU 16 (замер: час аудио за 0.9 мин против 6.3 мин без батчей),
+    #: на CPU 1 — там batching почти не даёт выигрыша, потому что CTranslate2
+    #: и так занимает все ядра одним окном, зато память растёт кратно.
+    whisper_batch_size: int = 0
+
+    # --- анализаторы (Этап 5+) ---
+    analyzers_disabled: str = ""
+
+    # --- скоринг (Этап 7+) ---
+    default_profile: str = "default"
+    score_alpha: float = 0.4
+    score_beta: float = 0.5
+    score_gamma: float = 0.1
+
+    # --- LLM (Этап 6+) ---
+    anthropic_api_key: str | None = None
+    llm_model: str = "claude-opus-5"
+    llm_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
+    llm_max_tokens: int = 8000
+    llm_batch_size: int = 40
+    llm_use_batch_api: bool = True
+    llm_enabled: bool = True
+
+    # --- лимиты ---
+    max_concurrent_jobs: int = 2
+    rate_limit_rpm: int = 60
+
+    # ------------------------------------------------------------ валидация
+    @field_validator("secret_key")
+    @classmethod
+    def _reject_default_secret_in_prod(cls, value: str, info: object) -> str:
+        # Проверку окружения делаем в model_post_init: здесь ещё нет app_env.
+        return value
+
+    def model_post_init(self, __context: object) -> None:
+        if self.app_env is AppEnv.PROD:
+            if self.secret_key == "dev-insecure-change-me":
+                raise ValueError("SECRET_KEY обязателен в проде")
+            if self.llm_enabled and not self.anthropic_api_key:
+                raise ValueError("ANTHROPIC_API_KEY обязателен при LLM_ENABLED=true в проде")
+
+        if self.scene_min_len_sec <= 0:
+            raise ValueError(
+                f"SCENE_MIN_LEN_SEC должен быть положительным: {self.scene_min_len_sec}"
+            )
+        if self.scene_max_len_sec <= self.scene_min_len_sec:
+            raise ValueError(
+                "SCENE_MAX_LEN_SEC должен быть больше SCENE_MIN_LEN_SEC, получено "
+                f"{self.scene_max_len_sec} <= {self.scene_min_len_sec}"
+            )
+
+        if self.whisper_chunk_sec and self.whisper_chunk_overlap_sec >= self.whisper_chunk_sec:
+            raise ValueError(
+                "WHISPER_CHUNK_OVERLAP_SEC должен быть меньше WHISPER_CHUNK_SEC, получено "
+                f"{self.whisper_chunk_overlap_sec} >= {self.whisper_chunk_sec}"
+            )
+
+        total = self.score_alpha + self.score_beta + self.score_gamma
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError(
+                f"SCORE_ALPHA + SCORE_BETA + SCORE_GAMMA должны давать 1.0, получено {total}"
+            )
+
+    # ---------------------------------------------------------- производные
+    @property
+    def database_url(self) -> str:
+        """DSN для asyncpg-драйвера SQLAlchemy."""
+        return str(
+            PostgresDsn.build(
+                scheme="postgresql+asyncpg",
+                username=self.postgres_user,
+                password=self.postgres_password,
+                host=self.postgres_host,
+                port=self.postgres_port,
+                path=self.postgres_db,
+            )
+        )
+
+    @property
+    def sync_database_url(self) -> str:
+        """DSN для psycopg — нужен Alembic, который работает синхронно."""
+        return self.database_url.replace("postgresql+asyncpg", "postgresql+psycopg")
+
+    @property
+    def allowed_containers_set(self) -> frozenset[str]:
+        return frozenset(x.strip().lower() for x in self.allowed_containers.split(",") if x.strip())
+
+    @property
+    def disabled_analyzers_set(self) -> frozenset[str]:
+        return frozenset(x.strip() for x in self.analyzers_disabled.split(",") if x.strip())
+
+    @property
+    def local_source_roots(self) -> tuple[Path, ...]:
+        return tuple(
+            Path(item.strip()) for item in self.local_source_roots_raw.split(",") if item.strip()
+        )
+
+    @property
+    def is_production(self) -> bool:
+        return self.app_env is AppEnv.PROD
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    """Синглтон настроек.
+
+    ``lru_cache`` вместо глобальной переменной: тест может вызвать
+    ``get_settings.cache_clear()`` и получить свежий объект с подменённым
+    окружением, а в проде разбор ``.env`` происходит ровно один раз.
+    """
+    return Settings()

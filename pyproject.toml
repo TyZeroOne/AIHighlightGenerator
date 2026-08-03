@@ -1,0 +1,147 @@
+[project]
+name = "ai-highlight-generator"
+version = "0.1.0"
+description = "Автоматический поиск интересных моментов в видео и генерация клипов"
+requires-python = ">=3.12,<3.13"
+
+# Ядро: то, что нужно ВСЕМ процессам (и api, и воркеру).
+# Ни одной тяжёлой ML-библиотеки здесь нет и не будет.
+dependencies = [
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "structlog>=24.4",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30",            # асинхронный драйвер — для приложения
+    "psycopg[binary]>=3.2",     # синхронный драйвер — для Alembic
+    "alembic>=1.14",
+    "boto3>=1.35",              # S3-совместимое хранилище (MinIO в dev)
+]
+
+[project.optional-dependencies]
+api = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "python-multipart>=0.0.17",
+    # API тоже ходит в Redis: readiness-проба сейчас, rate limiting на Этапе 10.
+    # Без этого /health/ready честно рапортует "degraded" — что и произошло
+    # при первом запуске в Docker.
+    "redis>=5.2",
+]
+worker = [
+    "celery[redis]>=5.4",
+    "redis>=5.2",
+    # Детекция сцен (Этап 3). headless-сборка OpenCV — намеренно: воркеру
+    # нужны только декодирование и арифметика по кадрам, а GUI-часть тянет
+    # десятки мегабайт зависимостей X11, которых в контейнере нет.
+    "scenedetect>=0.6.4",
+    "opencv-python-headless>=4.10",
+    # Распознавание речи (Этап 4). faster-whisper — это CTranslate2, а не
+    # PyTorch: вчетверо меньше памяти и вдвое быстрее оригинального openai-whisper
+    # при том же качестве. PyTorch появится на Этапе 5 ради SER и детекции лиц.
+    "faster-whisper>=1.1",
+]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "pytest-xdist>=3.6",
+    "hypothesis>=6.115",
+    "httpx>=0.27",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "boto3-stubs[s3]>=1.35",
+    # Те же, что у воркера: без них не запустить тесты детекции сцен
+    # и распознавания речи локально.
+    "scenedetect>=0.6.4",
+    "opencv-python-headless>=4.10",
+    "faster-whisper>=1.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/core", "src/api", "src/workers"]
+
+# ---------------------------------------------------------------- ruff
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",    # pycodestyle
+    "F",         # pyflakes
+    "I",         # isort — порядок импортов
+    "N",         # pep8-naming
+    "UP",        # pyupgrade — современный синтаксис
+    "B",         # bugbear — типичные ловушки
+    "C4",        # comprehensions
+    "SIM",       # упрощения
+    "PTH",       # pathlib вместо os.path
+    "RUF",
+]
+ignore = [
+    "B008",      # FastAPI Depends() в аргументах по умолчанию — идиома фреймворка
+    # Комментарии и docstring'и в проекте на русском. Правила «ambiguous unicode»
+    # рассчитаны на англоязычный код и здесь дают сотни ложных срабатываний
+    # на каждую кириллическую «а», «с», «о».
+    "RUF001", "RUF002", "RUF003",
+    # TC-правила (перенос импортов в TYPE_CHECKING) намеренно выключены:
+    # Pydantic и SQLAlchemy разрешают аннотации в рантайме, и спрятанный
+    # в TYPE_CHECKING тип ломает их на старте. Наши импорты — стандартная
+    # библиотека и собственный домен, экономить на них нечего.
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]
+# Миграции — сгенерированный/табличный код: длинные строки объявлений
+# ограничений читаются лучше в одну строку, чем разбитыми.
+"alembic/versions/*" = ["E501"]
+# PgUUID — общепринятый алиас для postgresql.UUID, чтобы не путать
+# его с uuid.UUID из стандартной библиотеки в том же файле.
+"src/core/infra/db/models.py" = ["N811"]
+
+# ---------------------------------------------------------------- mypy
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+plugins = ["pydantic.mypy"]
+mypy_path = "src"
+explicit_package_bases = true
+namespace_packages = true
+
+[[tool.mypy.overrides]]
+module = ["celery.*", "kombu.*", "scenedetect.*", "cv2.*", "faster_whisper.*", "ctranslate2.*"]
+ignore_missing_imports = true
+
+# Celery не поставляет типы: его декораторы и базовый Task для mypy — Any.
+# Строгий режим на этом останавливается. Ослабляем ровно две проверки и
+# только для workers/ — ядро проверяется по-прежнему строго.
+[[tool.mypy.overrides]]
+module = ["workers.*"]
+disallow_untyped_decorators = false
+disallow_subclassing_any = false
+
+# ---------------------------------------------------------------- pytest
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+addopts = "-q --strict-markers"
+markers = [
+    "unit: без внешних зависимостей, быстрые",
+    "integration: нужна БД / Redis / ffmpeg",
+    "e2e: полный конвейер",
+    "gpu: требует CUDA",
+    "llm: реальный вызов к Anthropic API",
+    "quality: метрики на golden-датасете",
+    "slow: дольше 10 секунд",
+]
+
+[tool.coverage.run]
+source = ["src"]
+omit = ["*/alembic/*", "*/__main__.py"]
