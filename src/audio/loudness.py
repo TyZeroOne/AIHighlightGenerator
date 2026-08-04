@@ -27,6 +27,7 @@ from typing import ClassVar, Final
 from core.domain.analysis import ARTIFACT_AUDIO, AnalysisContext
 from core.domain.errors import FFmpegError, TransientError
 from core.domain.values import FeatureValue, TimeRange
+from core.infra.proc import death_signal
 from core.logging import get_logger
 from core.registry import register_analyzer
 
@@ -241,6 +242,9 @@ class LoudnessAnalyzer:
                 *args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                # Дочерний ffmpeg не должен пережить воркера: при отмене джоба
+                # осиротевший процесс доедает ядра, и никто о нём уже не знает.
+                preexec_fn=death_signal(),
             )
         except FileNotFoundError as error:
             raise TransientError(

@@ -17,6 +17,7 @@ from uuid import UUID
 
 from core.container import get_container
 from core.domain.enums import JobStage
+from core.infra.metrics import JOBS_FINISHED
 from core.logging import get_logger
 from core.usecases.analyze import AnalysisResult
 from workers.app import celery_app
@@ -321,6 +322,10 @@ def finalize(self: FinalizeTask, job_id: str) -> dict[str, Any]:
     готового клипа не осталось.
     """
     result = run_async(get_container().finalize_job.execute(UUID(job_id)))
+    # Счётчик здесь, а не в сценарии: сценарий описывает предметную
+    # область и не должен знать, что кто-то ведёт по нему статистику.
+    if not result.reused:
+        JOBS_FINISHED.labels(status=result.status.value).inc()
     return {
         "job_id": str(result.job_id),
         "status": result.status.value,

@@ -6,6 +6,7 @@ import os
 from typing import Any
 
 from celery import Celery
+from celery.schedules import crontab
 from celery.signals import (
     worker_process_init,
     worker_process_shutdown,
@@ -30,6 +31,7 @@ settings = get_settings()
 TASK_MODULES: list[str] = [
     "workers.tasks.system",
     "workers.tasks.pipeline",
+    "workers.tasks.maintenance",
 ]
 
 celery_app = Celery("highlight_generator", include=TASK_MODULES)
@@ -98,10 +100,54 @@ celery_app.conf.task_routes = {
     "workers.tasks.*": {"queue": "cpu"},
 }
 
+# Расписание. Обе задачи уходят в очередь `io`: они ничего не считают,
+# только ходят в базу и хранилище, и занимать ими процессорный воркер,
+# пока тот режет клипы, незачем.
 celery_app.conf.beat_schedule = {
-    # Наполнится на Этапе 10; структура объявлена сразу, чтобы beat-контейнер
-    # можно было поднять и проверить уже сейчас.
+    "cleanup-expired-assets": {
+        "task": "workers.tasks.maintenance.cleanup_expired_assets",
+        # Раз в час, а не раз в сутки: артефакты копятся непрерывно,
+        # и суточный запуск означал бы пилу на графике свободного места
+        # с амплитудой в десятки гигабайт.
+        "schedule": crontab(minute="17"),
+        "options": {"queue": "io", "expires": 3000},
+    },
+    "reap-stuck-jobs": {
+        "task": "workers.tasks.maintenance.reap_stuck_jobs",
+        # Чаще уборки: зависший джоб виден пользователю, а лишние файлы —
+        # только нам.
+        "schedule": crontab(minute="*/10"),
+        "options": {"queue": "io", "expires": 500},
+    },
 }
+
+
+@worker_ready.connect
+def _start_metrics_server(**_: Any) -> None:
+    """Поднять экспортёр метрик в главном процессе воркера.
+
+    Именно в главном, а не в детях: порт один, а детей четыре, и второй
+    из них упал бы на «address already in use». Значения самих детей
+    попадают сюда через каталог ``PROMETHEUS_MULTIPROC_DIR`` — они пишут
+    туда файлы, экспортёр складывает их при опросе.
+
+    Каталог готовится (и чистится) здесь же, до старта сервера: файлы
+    процессов, умерших в прошлый запуск, иначе досчитывались бы вечно.
+    """
+    if not settings.metrics_enabled:
+        return
+
+    from prometheus_client import start_http_server
+
+    from core.infra.metrics import build_registry, prepare_multiprocess_dir
+
+    prepare_multiprocess_dir()
+    try:
+        start_http_server(settings.worker_metrics_port, registry=build_registry())
+    except OSError as error:  # pragma: no cover — занятый порт
+        log.warning("metrics.server_failed", port=settings.worker_metrics_port, error=str(error))
+        return
+    log.info("metrics.server_started", port=settings.worker_metrics_port)
 
 
 @worker_ready.connect

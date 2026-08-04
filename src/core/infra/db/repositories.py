@@ -456,6 +456,28 @@ class AssetRepository:
         )
         await self._session.execute(stmt)
 
+    async def expired(self, *, limit: int = 500) -> Sequence[Asset]:
+        stmt = (
+            select(AssetORM)
+            .where(
+                AssetORM.expires_at.is_not(None),
+                AssetORM.expires_at < datetime.now(UTC),
+                AssetORM.deleted_at.is_(None),
+            )
+            .order_by(AssetORM.expires_at)
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [asset_to_domain(row) for row in rows]
+
+    async def mark_deleted(self, asset_ids: Sequence[UUID]) -> None:
+        if not asset_ids:
+            return
+        stmt = (
+            update(AssetORM).where(AssetORM.id.in_(asset_ids)).values(deleted_at=datetime.now(UTC))
+        )
+        await self._session.execute(stmt)
+
 
 class SqlAlchemyUploadSessionRepository:
     def __init__(self, session: AsyncSession) -> None:

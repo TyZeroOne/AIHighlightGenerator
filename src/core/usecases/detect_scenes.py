@@ -52,6 +52,9 @@ type ProviderResolver = Callable[[str], SourceProvider]
 class SceneDetectionSettings:
     keyframes_enabled: bool = True
     keyframe_mime: str = "image/jpeg"
+    #: Сколько часов хранить превью сцен. Неделя: их показывает API
+    #: в разборе скоринга, а после того как джоб отсмотрен, они мусор.
+    retention_hours: int | None = 168
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +180,7 @@ class DetectScenes:
                     storage_key=key,
                     mime=self._settings.keyframe_mime,
                     meta={"scene_index": index, "at_sec": round(ranges[index].midpoint, 3)},
+                    ttl_hours=self._settings.retention_hours,
                 )
             await uow.commit()
 

@@ -21,6 +21,7 @@ from pathlib import Path
 from core.domain.errors import FFmpegError, TransientError
 from core.domain.media import AudioTrack, LocalMedia
 from core.domain.values import MediaWindow
+from core.infra.proc import death_signal
 from core.logging import get_logger
 
 __all__ = ["FFmpegAudioExtractor"]
@@ -89,6 +90,9 @@ class FFmpegAudioExtractor:
                 *args,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
+                # Дочерний ffmpeg не должен пережить воркера: при отмене джоба
+                # осиротевший процесс доедает ядра, и никто о нём уже не знает.
+                preexec_fn=death_signal(),
             )
         except FileNotFoundError as error:
             raise TransientError(

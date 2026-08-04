@@ -23,6 +23,7 @@ from pathlib import Path
 
 from core.domain.errors import TransientError
 from core.domain.media import LocalMedia
+from core.infra.proc import death_signal
 from core.logging import get_logger
 
 __all__ = ["FFmpegKeyframeExtractor"]
@@ -104,6 +105,9 @@ class FFmpegKeyframeExtractor:
                 *args,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
+                # Дочерний ffmpeg не должен пережить воркера: при отмене джоба
+                # осиротевший процесс доедает ядра, и никто о нём уже не знает.
+                preexec_fn=death_signal(),
             )
         except FileNotFoundError as error:
             # Отсутствие бинарника — не «кадр не получился», а сломанное

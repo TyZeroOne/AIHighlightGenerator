@@ -33,6 +33,7 @@ x-app-env: &app-env
   S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
   S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
   LOCAL_SOURCE_ROOTS_RAW: ${LOCAL_SOURCE_ROOTS_RAW:-/media/in}
+  METRICS_ENABLED: ${METRICS_ENABLED:-true}
   # Языковая модель (Этапы 6 и 9). Переменные перечислены поимённо,
   # а не подтягиваются файлом: контейнер не монтирует `.env`, и всё,
   # чего здесь нет, до приложения не доезжает. Отсутствие
@@ -157,6 +158,15 @@ services:
       # иначе задачи будут случайно доставаться то CPU, то GPU.
       CELERY_QUEUES: ${WORKER_CPU_QUEUES:-cpu,io,gpu}
       CELERY_CONCURRENCY: ${WORKER_CPU_CONCURRENCY:-4}
+      # Только воркеру: он работает пулом процессов, и счётчики детей
+      # видны родителю лишь через этот каталог. API — один процесс,
+      # и включённый там многопроцессный режим означает лишь падение
+      # на первом же опросе, если каталога нет (проверено).
+      PROMETHEUS_MULTIPROC_DIR: /tmp/highlight-metrics
+    ports:
+      # Экспортёр метрик воркера. Наружу выставлен только ради отладки;
+      # Prometheus ходит к нему по имени сервиса внутри сети.
+      - "${WORKER_METRICS_PORT:-9100}:9100"
     volumes:
       - media:/media
       - models:/models
@@ -183,6 +193,7 @@ services:
       CELERY_QUEUES: gpu
       CELERY_CONCURRENCY: ${WORKER_GPU_CONCURRENCY:-1}
       DEVICE: cuda
+      PROMETHEUS_MULTIPROC_DIR: /tmp/highlight-metrics
     volumes:
       - media:/media
       - models:/models
@@ -246,6 +257,35 @@ services:
       timeout: 5s
       retries: 15
 
+  prometheus:
+    profiles: ["tools"]
+    image: prom/prometheus:v3.1.0
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    restart: unless-stopped
+
+  grafana:
+    profiles: ["tools"]
+    image: grafana/grafana:11.5.1
+    environment:
+      # Пароль по умолчанию — для локальной разработки. В проде дашборд
+      # закрывается тем же способом, что и всё остальное: не выставляется
+      # наружу вовсе.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./docker/grafana:/etc/grafana/provisioning:ro
+      - grafanadata:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
   flower:
     profiles: ["tools"]
     image: mher/flower:2.0
@@ -260,6 +300,8 @@ services:
     restart: unless-stopped
 
 volumes:
+  promdata:
+  grafanadata:
   pgdata:
   redisdata:
   media:

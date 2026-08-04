@@ -51,6 +51,7 @@ from core.usecases.chunked_upload import (
 from core.usecases.detect_scenes import DetectScenes, SceneDetectionSettings
 from core.usecases.finalize import FinalizeJob
 from core.usecases.jobs import CancelJob, ListJobs, RetryJob, StartAnalysis
+from core.usecases.maintenance import CleanupExpiredAssets, ReapStuckJobs
 from core.usecases.metadata import GenerateMetadata
 from core.usecases.rank import RankScenes
 from core.usecases.render import RenderClips, RenderSettings
@@ -330,6 +331,7 @@ class Container:
             workdir=self.workdir,
             settings=SceneDetectionSettings(
                 keyframes_enabled=self.settings.scene_keyframes_enabled,
+                retention_hours=self.settings.retention_frames_h,
             ),
         )
 
@@ -533,6 +535,7 @@ class Container:
                 concurrency=settings.render_concurrency,
                 subtitle_formats=settings.subtitle_formats_list,
                 burn=settings.burn_subtitles,
+                retention_hours=settings.retention_clips_h,
             ),
         )
 
@@ -646,6 +649,18 @@ class Container:
     @cached_property
     def cancel_job(self) -> CancelJob:
         return CancelJob(uow_factory=self.uow, dispatcher=self.dispatcher)
+
+    # ------------------------------------------------------- уборка
+    @cached_property
+    def cleanup_assets(self) -> CleanupExpiredAssets:
+        return CleanupExpiredAssets(uow_factory=self.uow, storage=self.storage)
+
+    @cached_property
+    def reap_stuck_jobs(self) -> ReapStuckJobs:
+        return ReapStuckJobs(
+            uow_factory=self.uow,
+            timeout_sec=self.settings.stuck_job_timeout_sec,
+        )
 
     @cached_property
     def manifest_builder(self) -> ManifestBuilder:

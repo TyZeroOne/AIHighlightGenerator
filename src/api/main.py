@@ -8,6 +8,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from api.errors import install_error_handlers
+from api.metrics import MetricsMiddleware
+from api.metrics import router as metrics_router
 from api.middleware import TraceMiddleware
 from api.routers import clips, health, jobs, system, uploads, videos
 from core import __version__
@@ -52,6 +54,11 @@ def create_app() -> FastAPI:
         openapi_url="/openapi.json",
     )
 
+    # Порядок важен: MetricsMiddleware добавляется первым, значит
+    # выполняется последним и меряет только обработку запроса, без времени
+    # на трассировку и логирование. Мерить собственные накладные расходы
+    # и выдавать их за длительность обработки — способ обмануть себя.
+    application.add_middleware(MetricsMiddleware)
     application.add_middleware(TraceMiddleware)
     install_error_handlers(application)
 
@@ -61,6 +68,7 @@ def create_app() -> FastAPI:
     application.include_router(uploads.router)
     application.include_router(jobs.router)
     application.include_router(clips.router)
+    application.include_router(metrics_router)
 
     return application
 

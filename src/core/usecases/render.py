@@ -107,6 +107,9 @@ class RenderSettings:
     burn: bool = False
     video_mime: str = "video/mp4"
     image_mime: str = "image/jpeg"
+    #: Сколько часов хранить готовые клипы. Три месяца: это результат,
+    #: за которым возвращаются, а не промежуточный файл.
+    retention_hours: int | None = 2160
 
 
 @dataclass(frozen=True, slots=True)
@@ -512,6 +515,7 @@ class RenderClips:
                         mime=mime,
                         size_bytes=size,
                         meta={"rank": clip.rank, "reframe_mode": item.reframe_mode},
+                        ttl_hours=self._settings.retention_hours,
                     )
             await uow.commit()
 

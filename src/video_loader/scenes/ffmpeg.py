@@ -25,6 +25,7 @@ from typing import Final
 from core.domain.errors import FFmpegError, TransientError
 from core.domain.media import LocalMedia
 from core.domain.values import MediaWindow, TimeRange
+from core.infra.proc import death_signal
 from core.logging import get_logger
 from video_loader.scenes.postprocess import normalize_scenes
 
@@ -157,6 +158,9 @@ class FFmpegSceneDetector:
                 *args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                # Дочерний ffmpeg не должен пережить воркера: при отмене джоба
+                # осиротевший процесс доедает ядра, и никто о нём уже не знает.
+                preexec_fn=death_signal(),
             )
         except FileNotFoundError as error:
             raise TransientError(

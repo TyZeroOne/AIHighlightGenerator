@@ -13,6 +13,7 @@ from celery import Task
 
 from core.domain.enums import JobStage
 from core.domain.errors import ExternalServiceError, TransientError
+from core.infra.metrics import stage_timer
 from core.logging import bind_trace, get_logger
 
 __all__ = ["PipelineTask"]
@@ -44,8 +45,15 @@ class PipelineTask(Task):
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         job_id = kwargs.get("job_id") or (args[0] if args else None)
-        with bind_trace(job_id=job_id, stage=self.stage.value if self.stage else None):
-            return super().__call__(*args, **kwargs)
+        stage = self.stage.value if self.stage else None
+        with bind_trace(job_id=job_id, stage=stage):
+            if stage is None:
+                return super().__call__(*args, **kwargs)
+            # Замер здесь, а не в сценарии этапа: сценарий не должен знать
+            # ни про Prometheus, ни про то, что его кто-то меряет. Задача —
+            # уже слой доставки, ей это знать положено.
+            with stage_timer(stage):
+                return super().__call__(*args, **kwargs)
 
     def on_failure(
         self,

@@ -103,6 +103,24 @@ class AssetRepositoryPort(Protocol):
     ) -> Sequence[AssetRecord]: ...
     async def delete_for_owner(self, owner_type: AssetOwnerType, owner_id: UUID) -> None: ...
 
+    async def expired(self, *, limit: int = 500) -> Sequence[AssetRecord]:
+        """Артефакты, у которых вышел срок хранения.
+
+        Отдаются пачками: за сутки простоя их накапливаются тысячи,
+        а удаление каждого — это поход в хранилище, и делать их все
+        в одной транзакции значит держать её открытой минутами.
+        """
+        ...
+
+    async def mark_deleted(self, asset_ids: Sequence[UUID]) -> None:
+        """Пометить удалёнными — после того, как файлы действительно убраны.
+
+        Мягко, а не ``DELETE``: запись о том, что артефакт был и когда
+        исчез, стоит одну строку и отвечает на вопрос «куда делся файл»,
+        который иначе выясняется просмотром логов за неделю.
+        """
+        ...
+
 
 class UploadSessionRepository(Protocol):
     async def create(
