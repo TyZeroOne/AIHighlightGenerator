@@ -15,11 +15,16 @@ from dataclasses import replace
 from uuid import UUID, uuid4
 
 from core.domain.entities import Clip, Highlight, Scene
-from core.domain.values import FeatureValue, TimeRange
+from core.domain.values import FeatureValue, Score, TimeRange
 from core.logging import get_logger
 from highlight_detector.normalize import normalize_scenes
 from highlight_detector.profiles import get_profile
-from highlight_detector.scoring import fuse, heuristic_score
+from highlight_detector.scoring import (
+    SILENT_SCENE_CONFIDENCE,
+    fuse,
+    heuristic_score,
+    static_penalty,
+)
 from highlight_detector.selector import select_highlights
 from highlight_detector.signals import compute_signals
 from highlight_detector.structure import compute_structure
@@ -47,6 +52,19 @@ class DetectorService:
         for scene, norm, struct in zip(ordered, normalized, structure, strict=True):
             signals = compute_signals({**norm, **struct}, settings.signal_weights)
             score = heuristic_score(signals, settings)
+
+            # Штраф за длинный неподвижный план — по сырым признакам,
+            # а не по нормализованным: «неподвижно» здесь абсолютное
+            # свойство кадра, а не «неподвижнее прочих сцен».
+            penalty = static_penalty(
+                scene.feature("vision.motion.mean")
+                if "vision.motion.mean" in scene.features
+                else None,
+                scene.feature("vision.cuts.rate") if "vision.cuts.rate" in scene.features else None,
+                scene.range.duration,
+            )
+            if penalty < 1.0:
+                score = Score(value=score.value * penalty, breakdown=score.breakdown)
 
             # Признаки дописываются, а не заменяются: в той же колонке лежат
             # результаты трёх групп анализаторов Этапа 5.
@@ -131,7 +149,13 @@ class DetectorService:
         result: list[Scene] = []
         for scene in scenes:
             heuristic = scene.heuristic_score.value if scene.heuristic_score else 0.0
-            result.append(replace(scene, final_score=fuse(heuristic, scene.llm_score)))
+            has_speech = bool((scene.transcript_text or "").strip())
+            value = fuse(
+                heuristic,
+                scene.llm_score,
+                llm_confidence=1.0 if has_speech else SILENT_SCENE_CONFIDENCE,
+            )
+            result.append(replace(scene, final_score=round(value, 3)))
         return result
 
 

@@ -44,13 +44,31 @@ from core.domain.analysis import ScoringProfile
 from core.domain.values import Score
 from highlight_detector.profiles import GROUPS
 
-__all__ = ["ALPHA", "BETA", "GAMMA", "fuse", "heuristic_score"]
+__all__ = ["ALPHA", "BETA", "GAMMA", "fuse", "heuristic_score", "static_penalty"]
 
 #: Веса слияния по умолчанию (док 05, §5.6). В сумме единица — иначе
 #: итоговый скор вышел бы за 100.
 ALPHA: Final = 0.4
 BETA: Final = 0.5
 GAMMA: Final = 0.1
+
+#: Доверие к оценке модели для сцены без единой реплики. Не ноль: модель
+#: видит и описание признаков, и её «скучно» иногда справедливо. Но и не
+#: единица — судить ей там почти не по чему.
+SILENT_SCENE_CONFIDENCE: Final = 0.35
+
+#: Порог «сцена статична» по движению.
+_STATIC_MOTION: Final = 0.005
+
+#: И по частоте склеек. Требовать полного их отсутствия оказалось слишком
+#: строго: у финальной плашки трейлера была одна склейка за 24.7 секунды
+#: (0.04/с), и штраф не срабатывал. У живого материала рядом — 0.18–0.40/с,
+#: так что порог 0.1 разделяет их с запасом в обе стороны.
+_STATIC_CUTS_RATE: Final = 0.1
+#: И длиннее этого — короткий статичный план бывает выразительной паузой.
+_STATIC_MIN_DURATION: Final = 15.0
+#: Во сколько раз режется скор такого плана.
+_STATIC_PENALTY: Final = 0.5
 
 
 def heuristic_score(
@@ -101,6 +119,7 @@ def fuse(
     alpha: float = ALPHA,
     beta: float = BETA,
     gamma: float = GAMMA,
+    llm_confidence: float = 1.0,
 ) -> float:
     """Эвристика и оценка модели → итоговый скор 0..100.
 
@@ -109,9 +128,20 @@ def fuse(
     до единицы. Иначе сцена без вердикта получила бы 40 % от своего
     скора и проиграла бы конкуренцию не по существу, а потому что
     её не показали модели.
+
+    ``llm_confidence`` понижает вес модели там, где ей нечем судить.
+    Замер на трейлере показал, зачем это нужно: сценам экшен-кульминации
+    без единой реплики модель выставила 10–15 при эвристике 54–65 —
+    в сводке у них «Реплика: нет речи», и модель сочла их проходными.
+    Картинки она не видит, а значит её «неинтересно» здесь означает
+    «не о чем судить», и вес такого мнения должен быть меньше.
     """
     if llm_score is None:
         return round(_clamp(heuristic), 3)
+
+    confidence = max(0.0, min(1.0, llm_confidence))
+    beta *= confidence
+    gamma *= confidence
 
     agreement = 100.0 - abs(heuristic - llm_score)
     total = alpha + beta + gamma
@@ -120,6 +150,29 @@ def fuse(
 
     value = (alpha * heuristic + beta * llm_score + gamma * agreement) / total
     return round(_clamp(value), 3)
+
+
+def static_penalty(
+    motion: float | None,
+    cuts_rate: float | None,
+    duration_sec: float,
+) -> float:
+    """Множитель скора для статичных длинных планов.
+
+    Замер на трейлере: финальная плашка с датой выхода — одна сцена
+    на 24.7 секунды, движение 0.003 против 0.01–0.02 в остальном
+    материале. Модель дала ей 85 («важная новость, которую зрители
+    захотят обсудить») и вывела в топ. Формально верно, для клипа
+    бесполезно: смотреть там нечего.
+
+    Правило общее, а не про титры: длинный неподвижный план без
+    единой склейки не бывает хайлайтом, что бы в нём ни говорилось.
+    """
+    if motion is None or duration_sec < _STATIC_MIN_DURATION:
+        return 1.0
+    if motion >= _STATIC_MOTION or (cuts_rate or 0.0) >= _STATIC_CUTS_RATE:
+        return 1.0
+    return _STATIC_PENALTY
 
 
 def _clamp(value: float) -> float:

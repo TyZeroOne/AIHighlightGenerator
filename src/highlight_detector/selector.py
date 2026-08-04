@@ -53,6 +53,12 @@ MAX_VIDEO_FRACTION: Final = 0.5
 SNAP_WINDOW: Final = 1.5
 
 #: Порог пересечения, выше которого кандидат считается дублем (док 05, §5.7).
+#:
+#: Пробовали ужесточить до 0.25, чтобы убрать два клипа, покрывавших один
+#: размеченный момент с разных сторон (их IoU был 0.27 — на грани). Замер
+#: показал, что это плохой размен: Precision подросла на три пункта,
+#: а Recall упал с 0.83 до 0.67, потому что под нож попал и более точный
+#: из двух клипов. Оставлено 0.3.
 IOU_THRESHOLD: Final = 0.3
 
 #: Баланс «качество против разнообразия» в MMR. 0.7 — выдача остаётся
@@ -141,7 +147,9 @@ def expand(
             if max(left_score, right_score) < floor:
                 break
 
-            step = _grow(ordered, left, right, left_score, right_score, limit=span_limit)
+            step = _grow(
+                ordered, left, right, left_score, right_score, limit=span_limit, peak=position
+            )
             if step is None:
                 break
             left, right = step
@@ -158,6 +166,7 @@ def expand(
                 _score_at(ordered, left - 1),
                 _score_at(ordered, right + 1),
                 limit=max_duration_sec,
+                peak=position,
             )
             if step is None:
                 break
@@ -352,6 +361,7 @@ def _grow(
     right_score: float,
     *,
     limit: float,
+    peak: int,
 ) -> tuple[int, int] | None:
     """Один шаг расширения в сторону более сильного соседа.
 
@@ -359,23 +369,30 @@ def _grow(
     выводит кандидата за ``limit``. Общий код двух фаз — иначе они бы
     разошлись в поведении на границах, а именно там и живут ошибки.
     """
-    options: list[tuple[float, int, int]] = []
+    options: list[tuple[float, float, int, int]] = []
     if right + 1 < len(scenes):
         span = scenes[right + 1].range.end - scenes[left].range.start
         if span <= limit:
-            options.append((right_score, left, right + 1))
+            # Второй ключ — «насколько эта сторона отстаёт»: чем меньше
+            # уже прирос правый край, тем охотнее растём вправо.
+            options.append((right_score, -(right - peak), left, right + 1))
     if left - 1 >= 0:
         span = scenes[right].range.end - scenes[left - 1].range.start
         if span <= limit:
-            options.append((left_score, left - 1, right))
+            options.append((left_score, -(peak - left), left - 1, right))
 
     if not options:
         return None
 
-    # При равенстве предпочитаем рост вправо: клип, продолжающийся вперёд,
-    # смотрится естественнее, чем начинающийся раньше найденного момента.
-    best = max(options, key=lambda option: option[0])
-    return best[1], best[2]
+    # Сортировка по паре: сначала сильнейший сосед, при равенстве —
+    # та сторона, которая ближе к пику.
+    #
+    # Замер на трейлере показал, зачем нужен второй ключ: при простом
+    # «предпочитаем вправо» три клипа из четырёх начинались на 5–13 секунд
+    # позже размеченного экспертом момента. Пик оказывался в начале клипа,
+    # а не в середине: эксперт берёт завязку, система брала развязку.
+    best = max(options, key=lambda option: (option[0], option[1]))
+    return best[2], best[3]
 
 
 def _score_at(scenes: Sequence[Scene], position: int) -> float:
