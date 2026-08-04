@@ -33,6 +33,7 @@ def problem_response(
     title: str,
     detail: str,
     code: str,
+    headers: dict[str, str] | None = None,
     **extra: Any,
 ) -> JSONResponse:
     body: dict[str, Any] = {
@@ -45,7 +46,12 @@ def problem_response(
         "trace_id": get_trace_id(),
     }
     body.update(extra)
-    return JSONResponse(status_code=status_code, content=body, media_type=PROBLEM_MEDIA_TYPE)
+    return JSONResponse(
+        status_code=status_code,
+        content=body,
+        media_type=PROBLEM_MEDIA_TYPE,
+        headers=headers,
+    )
 
 
 def install_error_handlers(app: FastAPI) -> None:
@@ -66,6 +72,9 @@ def install_error_handlers(app: FastAPI) -> None:
             title=exc.__class__.__name__,
             detail=exc.message,
             code=exc.code,
+            # Некоторые ошибки несут заголовки: 429 без ``Retry-After``
+            # оставляет клиента гадать, когда пробовать снова.
+            headers=getattr(exc, "headers", None),
             **({"context": exc.context} if exc.context else {}),
         )
 

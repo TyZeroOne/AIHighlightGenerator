@@ -210,6 +210,63 @@ class SqlAlchemyJobRepository:
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return job_to_domain(row) if row else None
 
+    async def list_for_user(
+        self,
+        user_id: UUID,
+        *,
+        status: JobStatus | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> Sequence[Job]:
+        stmt = select(JobORM).where(JobORM.user_id == user_id)
+        if status is not None:
+            stmt = stmt.where(JobORM.status == status)
+        stmt = stmt.order_by(JobORM.created_at.desc()).limit(limit).offset(offset)
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [job_to_domain(row) for row in rows]
+
+    async def minutes_used(self, user_id: UUID, *, since: datetime) -> float:
+        """Сумма длительностей видео по джобам пользователя за период.
+
+        Джоины, а не отдельный счётчик в профиле: счётчик пришлось бы
+        поддерживать в согласии с джобами при каждом отказе, повторе
+        и отмене, а запрос всегда отвечает по фактическому состоянию.
+        """
+        stmt = (
+            select(func.coalesce(func.sum(VideoORM.duration_sec), 0))
+            .select_from(JobORM)
+            .join(VideoORM, VideoORM.id == JobORM.video_id)
+            .where(
+                JobORM.user_id == user_id,
+                JobORM.created_at >= since,
+                # Отменённые и провалившиеся не считаем: пользователь
+                # за них ничего не получил.
+                JobORM.status.notin_([JobStatus.CANCELLED, JobStatus.FAILED]),
+            )
+        )
+        total = (await self._session.execute(stmt)).scalar_one()
+        return round(float(total or 0) / 60.0, 2)
+
+    async def stuck(self, *, older_than_sec: float, limit: int = 100) -> Sequence[Job]:
+        """Джобы, которые «выполняются» дольше разумного.
+
+        Ориентир — ``updated_at``, а не ``created_at``: живой джоб трогает
+        запись на каждой отметке этапа, и по времени последнего изменения
+        видно, дышит он или нет.
+        """
+        deadline = datetime.now(UTC) - timedelta(seconds=older_than_sec)
+        stmt = (
+            select(JobORM)
+            .where(
+                JobORM.status.in_([JobStatus.QUEUED, JobStatus.RUNNING]),
+                JobORM.updated_at < deadline,
+            )
+            .order_by(JobORM.updated_at)
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [job_to_domain(row) for row in rows]
+
     async def update(self, job: Job) -> Job:
         values = job_to_orm_values(job)
         values.pop("id", None)

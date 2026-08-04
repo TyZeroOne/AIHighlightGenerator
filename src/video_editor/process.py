@@ -20,6 +20,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from core.domain.errors import FFmpegError, TransientError
+from core.infra.proc import death_signal
 from core.logging import get_logger
 
 __all__ = [
@@ -60,6 +61,11 @@ async def run_ffmpeg(
             *command,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
+            # Отмена джоба убивает задачу воркера, но не её детей: в POSIX
+            # осиротевший ffmpeg переходит к init и доедает ядра до конца.
+            # PDEATHSIG просит ядро прислать ему SIGKILL вместе со смертью
+            # родителя — независимо от того, кто и как этого родителя убил.
+            preexec_fn=death_signal(),
         )
     except FileNotFoundError as error:
         raise TransientError(

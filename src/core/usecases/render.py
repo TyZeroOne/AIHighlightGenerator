@@ -63,7 +63,7 @@ from core.ports.media import ClipRenderer, CropPlanner, SubtitleWriter
 from core.ports.repository import UnitOfWorkFactory
 from core.ports.source import SourceProvider
 from core.ports.storage import ObjectStorage
-from core.usecases.stages import StageTracker
+from core.usecases.stages import StageTracker, params_of
 
 __all__ = ["RenderClips", "RenderResult", "RenderSettings", "thumbnail_moment"]
 
@@ -188,8 +188,18 @@ class RenderClips:
 
         await self._tracker.begin(job)
 
+        # Настройки этапа = конфиг процесса, уточнённый параметрами джоба.
+        # Выключить вертикаль можно и там и там; включить обратно тем,
+        # что процесс её не умеет, — нельзя.
+        params = params_of(job)
+        settings = replace(
+            self._settings,
+            vertical=self._settings.vertical and params.vertical,
+            burn=self._settings.burn or params.burn_subtitles,
+        )
+
         try:
-            result = await self._run(job, video, clips, transcript, started)
+            result = await self._run(job, video, clips, transcript, started, settings)
         except Exception as error:
             await self._tracker.fail(job, error, duration_sec=_elapsed(started))
             raise
@@ -213,6 +223,7 @@ class RenderClips:
         clips: Sequence[Clip],
         transcript: Transcript,
         started: float,
+        settings: RenderSettings,
     ) -> RenderResult:
         provider = self._resolve_provider(video.source_uri)
         media = await provider.acquire(video.source_uri)
@@ -220,8 +231,8 @@ class RenderClips:
         target.mkdir(parents=True, exist_ok=True)
 
         try:
-            rendered = await self._render_all(job, media, clips, transcript, target)
-            await self._publish(job, clips, rendered)
+            rendered = await self._render_all(job, media, clips, transcript, target, settings)
+            await self._publish(job, clips, rendered, settings)
         finally:
             await provider.release(media)
             await asyncio.to_thread(_cleanup, target)
@@ -250,7 +261,7 @@ class RenderClips:
             duration_sec=_elapsed(started),
             modes=modes,
             subtitles=sum(len(item.subtitles) for item in ok),
-            burned=self._settings.burn and self._subtitles is not None,
+            burned=settings.burn and self._subtitles is not None,
             warnings=tuple(warning for item in rendered for warning in item.warnings),
         )
 
@@ -261,15 +272,16 @@ class RenderClips:
         clips: Sequence[Clip],
         transcript: Transcript,
         target: Path,
+        settings: RenderSettings,
     ) -> list[RenderedClip]:
-        semaphore = asyncio.Semaphore(max(self._settings.concurrency, 1))
+        semaphore = asyncio.Semaphore(max(settings.concurrency, 1))
         done = 0
         lock = asyncio.Lock()
 
         async def worker(clip: Clip) -> RenderedClip:
             nonlocal done
             async with semaphore:
-                result = await self._render_one(media, clip, transcript, target)
+                result = await self._render_one(media, clip, transcript, target, settings)
             async with lock:
                 done += 1
                 # Прогресс пишется по мере готовности клипов: этап идёт
@@ -285,8 +297,9 @@ class RenderClips:
         clip: Clip,
         transcript: Transcript,
         target: Path,
+        settings: RenderSettings,
     ) -> RenderedClip:
-        spec = self._settings.spec
+        spec = settings.spec
         stem = f"{clip.rank:03d}"
         warnings: list[str] = []
 
@@ -294,7 +307,7 @@ class RenderClips:
         # для ffmpeg, а не результатом. Их отсутствие клип не отменяет —
         # видео без речи это норма.
         subtitles, burn_horizontal = self._write_subtitles(
-            clip, transcript, media, target, warnings
+            clip, transcript, media, target, warnings, settings
         )
 
         try:
@@ -310,15 +323,15 @@ class RenderClips:
 
         vertical: Path | None = None
         mode: str | None = None
-        if self._settings.vertical and self._planner is not None:
+        if settings.vertical and self._planner is not None:
             vertical, mode, warning = await self._make_vertical(
-                horizontal, clip, transcript, target
+                horizontal, clip, transcript, target, settings
             )
             if warning:
                 warnings.append(warning)
 
         thumbnail: Path | None = None
-        if self._settings.thumbnails:
+        if settings.thumbnails:
             try:
                 thumbnail = await self._renderer.thumbnail(
                     horizontal,
@@ -346,6 +359,7 @@ class RenderClips:
         media: LocalMedia,
         target: Path,
         warnings: list[str],
+        settings: RenderSettings,
     ) -> tuple[dict[str, Path], Path | None]:
         """Файлы субтитров клипа и путь к тому, что пойдёт в вжигание.
 
@@ -358,7 +372,7 @@ class RenderClips:
             return {}, None
 
         written: dict[str, Path] = {}
-        for fmt in self._settings.subtitle_formats:
+        for fmt in settings.subtitle_formats:
             kind = SUBTITLE_KINDS.get(fmt)
             if kind is None:
                 warnings.append(f"клип {clip.rank}: формат субтитров {fmt!r} не поддерживается")
@@ -375,7 +389,7 @@ class RenderClips:
             except Exception as error:
                 warnings.append(f"клип {clip.rank}: субтитры {fmt} — {error}")
 
-        if not self._settings.burn:
+        if not settings.burn:
             return written, None
 
         # Для вжигания в горизонталь нужен ASS под её собственный кадр.
@@ -392,6 +406,7 @@ class RenderClips:
         width: int,
         height: int,
         suffix: str,
+        settings: RenderSettings,
     ) -> Path | None:
         """Отдельный ASS под кадр другого размера.
 
@@ -400,7 +415,7 @@ class RenderClips:
         растянет текст поперёк. Файл временный — в хранилище уезжает
         только «родная» версия клипа.
         """
-        if self._subtitles is None or not self._settings.burn or transcript.is_empty:
+        if self._subtitles is None or not settings.burn or transcript.is_empty:
             return None
         try:
             return self._subtitles.write(
@@ -421,6 +436,7 @@ class RenderClips:
         clip: Clip,
         transcript: Transcript,
         target: Path,
+        settings: RenderSettings,
     ) -> tuple[Path | None, str | None, str | None]:
         """Вертикаль — или причина, по которой её нет.
 
@@ -436,6 +452,7 @@ class RenderClips:
             width=VERTICAL_WIDTH,
             height=VERTICAL_HEIGHT,
             suffix="v",
+            settings=settings,
         )
         try:
             track = await self._planner.plan(
@@ -446,7 +463,7 @@ class RenderClips:
             path, mode = await self._renderer.reframe_vertical(
                 horizontal,
                 track,
-                replace(self._settings.spec, burn_subtitles_path=burn),
+                replace(settings.spec, burn_subtitles_path=burn),
                 target / f"{clip.rank:03d}_v.mp4",
             )
         except Exception as error:
@@ -459,6 +476,7 @@ class RenderClips:
         job: Job,
         clips: Sequence[Clip],
         rendered: Sequence[RenderedClip],
+        settings: RenderSettings,
     ) -> None:
         """Файлы в хранилище, ссылки и статусы — в базу.
 
@@ -475,7 +493,7 @@ class RenderClips:
             if not item.ok:
                 uploads.append((clip, item, []))
                 continue
-            assets = await self._upload(job.id, clip, item)
+            assets = await self._upload(job.id, clip, item, settings)
             uploads.append((clip, item, assets))
 
         async with self._uow_factory() as uow:
@@ -502,8 +520,8 @@ class RenderClips:
         job_id: UUID,
         clip: Clip,
         item: RenderedClip,
+        settings: RenderSettings,
     ) -> list[tuple[AssetKind, str, str, int]]:
-        settings = self._settings
         plan: list[tuple[Path | None, AssetKind, str, str]] = [
             (item.horizontal, AssetKind.CLIP_H, clip_key(job_id, clip.rank), settings.video_mime),
             (

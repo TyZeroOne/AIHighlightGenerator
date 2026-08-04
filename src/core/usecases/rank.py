@@ -46,7 +46,7 @@ from core.domain.errors import ExternalServiceError
 from core.logging import get_logger
 from core.ports.llm import SceneRanker
 from core.ports.repository import UnitOfWorkFactory
-from core.usecases.stages import StageTracker
+from core.usecases.stages import StageTracker, params_of
 
 __all__ = ["RankScenes", "RankingResult"]
 
@@ -99,8 +99,18 @@ class RankScenes:
         if job.is_stage_done(JobStage.LLM_RANK):
             return self._empty(job_id, reused=True)
 
-        if not self._enabled:
-            await self._tracker.skip(job, "LLM выключен (LLM_ENABLED=false)")
+        params = params_of(job, self._profile)
+        # Два независимых выключателя, и оба обязаны работать: конфиг
+        # процесса («модели у нас нет вообще») и параметр джоба («на этом
+        # видео она не нужна»). Второй появился на Этапе 10 вместе
+        # с `POST /analyze`.
+        if not self._enabled or not params.use_llm:
+            reason = (
+                "LLM выключен (LLM_ENABLED=false)"
+                if not self._enabled
+                else "LLM выключен параметрами джоба (use_llm=false)"
+            )
+            await self._tracker.skip(job, reason)
             return self._empty(job_id, skipped=True)
 
         async with self._uow_factory() as uow:
@@ -116,7 +126,7 @@ class RankScenes:
             title=video.original_filename,
             duration_sec=video.info.duration_sec if video.info else 0.0,
             language=_language_of(scenes),
-            profile=self._profile,
+            profile=params.profile,
             scene_count=len(scenes),
         )
 

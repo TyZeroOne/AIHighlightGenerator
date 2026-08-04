@@ -31,7 +31,7 @@ from core.domain.enums import JobStage
 from core.logging import get_logger
 from core.ports.repository import UnitOfWorkFactory
 from core.ports.scoring import SceneScorer
-from core.usecases.stages import StageTracker
+from core.usecases.stages import StageTracker, params_of
 
 __all__ = ["ScoreScenes", "ScoringResult"]
 
@@ -81,10 +81,11 @@ class ScoreScenes:
             await self._tracker.skip(job, "нет сцен: этап детекции не выполнялся")
             return ScoringResult(job_id, 0, 0.0, 0.0, 0.0, skipped=True)
 
+        params = params_of(job, self._profile)
         await self._tracker.begin(job)
 
         try:
-            scored = self._scorer.score(scenes, profile=self._profile)
+            scored = self._scorer.score(scenes, profile=params.profile)
         except Exception as error:
             await self._tracker.fail(job, error, duration_sec=_elapsed(started))
             raise

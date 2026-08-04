@@ -34,7 +34,7 @@ from core.domain.values import TimeRange
 from core.logging import get_logger
 from core.ports.repository import UnitOfWorkFactory
 from core.ports.scoring import HighlightSelector
-from core.usecases.stages import StageTracker
+from core.usecases.stages import StageTracker, params_of
 
 __all__ = ["SelectHighlights", "SelectionResult", "pauses_from_transcript"]
 
@@ -94,13 +94,14 @@ class SelectHighlights:
             await self._tracker.skip(job, "нет сцен: этап детекции не выполнялся")
             return SelectionResult(job_id, 0, 0, 0.0, 0.0, 0.0, skipped=True)
 
+        params = params_of(job, self._profile)
         await self._tracker.begin(job)
 
         try:
             fused = self._selector.fuse_scores(scenes)
             highlights = self._selector.select(
                 fused,
-                profile=self._profile,
+                profile=params.profile,
                 pauses=pauses_from_transcript(transcript),
                 total_duration_sec=total_duration_sec,
             )

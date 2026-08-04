@@ -10,6 +10,7 @@ from __future__ import annotations
 from enum import StrEnum
 
 __all__ = [
+    "STAGE_ORDER",
     "AssetKind",
     "AssetOwnerType",
     "ClipStatus",
@@ -92,12 +93,23 @@ class JobStage(StrEnum):
     FINALIZE = "finalize"
 
 
+#: Порядок этапов как последовательность. Отдельное имя, а не
+#: ``list(JobStage)`` по месту: от этого порядка зависит, что именно
+#: пересчитывается при повторе с этапа, и такую вещь надо называть.
+STAGE_ORDER: tuple[JobStage, ...] = tuple(JobStage)
+
+
 #: Вклад каждого этапа в общий прогресс (в сумме 100). Держится рядом
 #: с самим enum, чтобы новый этап нельзя было добавить, забыв про прогресс:
 #: тест сверяет ключи этого словаря с составом JobStage.
 STAGE_WEIGHTS: dict[JobStage, int] = {
-    JobStage.INGEST: 3,
-    JobStage.DETECT_SCENES: 7,
+    # Нулевой вес намеренно. ``ingest`` описан как этап и остался в enum,
+    # но отдельной задачи у него нет: файл скачивает тот этап, которому
+    # он понадобился, через ``SourceProvider``. Пока вес был ненулевым,
+    # успешно завершённый джоб показывал 97 % — три процента ждали шага,
+    # которого не существует.
+    JobStage.INGEST: 0,
+    JobStage.DETECT_SCENES: 10,
     JobStage.EXTRACT_AUDIO: 5,
     JobStage.TRANSCRIBE: 25,
     JobStage.ANALYZE_AUDIO: 5,

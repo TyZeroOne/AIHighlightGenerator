@@ -18,11 +18,12 @@ from uuid import UUID
 
 from core.domain.entities import Job, Video
 from core.domain.enums import JobStage, JobStatus
-from core.domain.errors import NotFoundError, ValidationError
+from core.domain.errors import JobCancelledError, NotFoundError, ValidationError
+from core.domain.params import AnalysisParams
 from core.logging import get_logger
 from core.ports.repository import UnitOfWorkFactory
 
-__all__ = ["StageTracker"]
+__all__ = ["StageTracker", "params_of"]
 
 log = get_logger(__name__)
 
@@ -45,6 +46,13 @@ class StageTracker:
             if job is None:
                 raise NotFoundError("Джоб не найден", job_id=str(job_id))
             video = await uow.videos.get(job.video_id)
+
+        if job.status is JobStatus.CANCELLED:
+            # Проверка отмены — на границе каждого этапа, и это единственное
+            # место, где она нужна. Отзыв задачи в Celery останавливает только
+            # то, что ещё не началось; уже выполняющаяся цепочка узнаёт
+            # об отмене здесь и не берётся за следующий этап.
+            raise JobCancelledError("Джоб отменён", job_id=str(job_id), stage=self._stage.value)
 
         if video is None:
             raise NotFoundError("Видео джоба не найдено", video_id=str(job.video_id))
@@ -121,3 +129,25 @@ class StageTracker:
         async with self._uow_factory() as uow:
             await uow.jobs.update(updated)
             await uow.commit()
+
+
+def params_of(job: Job, fallback_profile: str = "default") -> AnalysisParams:
+    """Параметры конкретного джоба, а не настройки процесса.
+
+    До Этапа 10 профиль приходил из конфига: конвейер запускала командная
+    строка, и другого источника не было. Теперь его задаёт запрос — и если
+    бы этап продолжал читать конфиг, ``POST /analyze`` с профилем
+    ``podcast`` молча считался бы профилем по умолчанию, то есть API врал бы
+    о том, что делает. Настройка остаётся значением на случай, когда джоб
+    создан без параметров (например, из старой команды CLI).
+    """
+    if not job.params:
+        return AnalysisParams(profile=fallback_profile)
+    try:
+        return AnalysisParams.from_mapping(job.params)
+    except (TypeError, ValueError):
+        # Параметры могли быть записаны прежней версией и не пройти нынешнюю
+        # проверку. Уронить из-за этого готовый джоб хуже, чем посчитать его
+        # значениями по умолчанию.
+        log.warning("job.params_unreadable", job_id=str(job.id))
+        return AnalysisParams(profile=fallback_profile)

@@ -140,13 +140,24 @@ class TestJobProgress:
         assert job.progress == pytest.approx(100.0)
 
     def test_with_stage_does_not_mutate_the_original(self) -> None:
-        original = self._job().with_stage(JobStage.INGEST, "succeeded")
+        original = self._job().with_stage(JobStage.EXTRACT_AUDIO, "succeeded")
 
         updated = original.with_stage(JobStage.DETECT_SCENES, "succeeded")
 
         assert JobStage.DETECT_SCENES not in original.stages
-        assert original.progress == pytest.approx(3.0)
-        assert updated.progress == pytest.approx(10.0)
+        assert original.progress == pytest.approx(5.0)
+        assert updated.progress == pytest.approx(15.0)
+
+    def test_ingest_weighs_nothing(self) -> None:
+        """Регресс: у ``ingest`` нет своей задачи — файл скачивает тот этап,
+        которому он понадобился. Пока вес был ненулевым, завершённый джоб
+        показывал 97 %, ожидая шага, которого не существует."""
+        job = self._job()
+        for stage in JobStage:
+            if stage is not JobStage.INGEST:
+                job = job.with_stage(stage, "succeeded")
+
+        assert job.progress == pytest.approx(100.0)
 
 
 class TestTranscript:

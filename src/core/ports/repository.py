@@ -9,6 +9,7 @@ Repository прячет способ хранения: сценарий гово
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 from types import TracebackType
 from typing import Protocol, Self
 from uuid import UUID
@@ -132,6 +133,38 @@ class JobRepository(Protocol):
 
     async def update(self, job: Job) -> Job: ...
     async def list_by_status(self, status: JobStatus, *, limit: int) -> Sequence[Job]: ...
+
+    async def list_for_user(
+        self,
+        user_id: UUID,
+        *,
+        status: JobStatus | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> Sequence[Job]:
+        """Джобы пользователя, новые сверху.
+
+        Фильтр по владельцу зашит в запрос, а не оставлен вызывающему:
+        отдельный ``list_all`` рано или поздно позвали бы без него.
+        """
+        ...
+
+    async def minutes_used(self, user_id: UUID, *, since: datetime) -> float:
+        """Сколько минут видео пользователь отправил в обработку с этого момента.
+
+        Считается по длительности исходников, а не по времени работы
+        воркеров: квота выдаётся в минутах материала, и пользователь
+        не должен платить за то, что наша модель считает медленно.
+        """
+        ...
+
+    async def stuck(self, *, older_than_sec: float, limit: int = 100) -> Sequence[Job]:
+        """Джобы, застрявшие в работе дольше положенного.
+
+        Нужны периодической уборке: воркер, убитый по OOM, оставляет джоб
+        в ``running`` навсегда, и снаружи он неотличим от живого.
+        """
+        ...
 
 
 class SceneRepository(Protocol):

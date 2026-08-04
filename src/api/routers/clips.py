@@ -16,6 +16,7 @@ from fastapi.responses import RedirectResponse, StreamingResponse
 
 from api.deps import ContainerDep, CurrentUser
 from api.ranges import parse_range
+from api.ratelimit import rate_limit
 from api.schemas.clips import ClipItemResponse, ClipListResponse
 from core.domain.enums import AssetOwnerType
 from core.domain.errors import NotFoundError, ValidationError
@@ -23,7 +24,7 @@ from core.ports.repository import AssetRecord, UnitOfWork
 
 __all__ = ["router"]
 
-router = APIRouter(prefix="/api/v1", tags=["clips"])
+router = APIRouter(prefix="/api/v1", tags=["clips"], dependencies=[rate_limit()])
 
 #: Расширение файла по типу содержимого. Нужно только для имени в
 #: ``Content-Disposition``: браузер выбирает приложение по нему, а не

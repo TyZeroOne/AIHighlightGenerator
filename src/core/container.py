@@ -26,6 +26,7 @@ from core.infra.db.session import create_engine, create_session_factory
 from core.infra.db.uow import SqlAlchemyUnitOfWork
 from core.logging import configure_logging, get_logger
 from core.ports.export import ManifestBuilder
+from core.ports.limits import RateLimiter
 from core.ports.llm import ClipAnnotator, LLMProvider, SceneRanker
 from core.ports.media import (
     AudioExtractor,
@@ -39,6 +40,7 @@ from core.ports.repository import UnitOfWork
 from core.ports.source import MediaProbe, SourceProvider
 from core.ports.speech import Transcriber
 from core.ports.storage import ObjectStorage
+from core.ports.tasks import PipelineDispatcher
 from core.usecases.analyze import AnalyzeFeatures
 from core.usecases.chunked_upload import (
     ChunkedUploadLimits,
@@ -48,6 +50,7 @@ from core.usecases.chunked_upload import (
 )
 from core.usecases.detect_scenes import DetectScenes, SceneDetectionSettings
 from core.usecases.finalize import FinalizeJob
+from core.usecases.jobs import CancelJob, ListJobs, RetryJob, StartAnalysis
 from core.usecases.metadata import GenerateMetadata
 from core.usecases.rank import RankScenes
 from core.usecases.render import RenderClips, RenderSettings
@@ -594,6 +597,55 @@ class Container:
             annotator_factory=self.clip_annotator,
             enabled=self.settings.llm_enabled,
         )
+
+    # ------------------------------------------------------- Этап 10
+    @cached_property
+    def rate_limiter(self) -> RateLimiter:
+        """Ограничитель частоты запросов.
+
+        Redis, если он настроен, иначе счётчик в памяти. Второй честно
+        непригоден для нескольких реплик — но лучше, чем ничего, когда
+        приложение поднято одним процессом.
+        """
+        try:
+            from redis.asyncio import Redis
+
+            from core.infra.ratelimit import RedisRateLimiter
+
+            return RedisRateLimiter(Redis.from_url(str(self.settings.redis_url)))
+        except ImportError:  # pragma: no cover — зависит от установленных extra
+            from core.infra.ratelimit import InMemoryRateLimiter
+
+            log.warning("ratelimit.in_memory", reason="redis не установлен")
+            return InMemoryRateLimiter()
+
+    @cached_property
+    def dispatcher(self) -> PipelineDispatcher:
+        """Постановка конвейера в очередь.
+
+        Импорт внутри свойства: ``workers.flows`` тянет за собой Celery,
+        а контейнер создаётся и в процессах, которым очередь не нужна
+        (например, в тестах сценариев).
+        """
+        from workers.flows import CeleryDispatcher
+
+        return CeleryDispatcher()
+
+    @cached_property
+    def start_analysis(self) -> StartAnalysis:
+        return StartAnalysis(uow_factory=self.uow, dispatcher=self.dispatcher)
+
+    @cached_property
+    def list_jobs(self) -> ListJobs:
+        return ListJobs(uow_factory=self.uow)
+
+    @cached_property
+    def retry_job(self) -> RetryJob:
+        return RetryJob(uow_factory=self.uow, dispatcher=self.dispatcher)
+
+    @cached_property
+    def cancel_job(self) -> CancelJob:
+        return CancelJob(uow_factory=self.uow, dispatcher=self.dispatcher)
 
     @cached_property
     def manifest_builder(self) -> ManifestBuilder:

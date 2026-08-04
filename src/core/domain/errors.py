@@ -22,6 +22,7 @@ __all__ = [
     "FFmpegError",
     "FileTooLargeError",
     "HighlightError",
+    "JobCancelledError",
     "ModelLoadError",
     "NotFoundError",
     "ObjectNotFoundError",
@@ -149,6 +150,19 @@ class ObjectNotFoundError(StorageError):
 class FileTooLargeError(ValidationError):
     http_status = 413
     code = "FILE_TOO_LARGE"
+
+
+class JobCancelledError(HighlightError):
+    """Джоб отменён пользователем, пока этап выполнялся.
+
+    Не ошибка в обычном смысле: никто ничего не сломал, просто работу
+    больше делать не надо. Отдельный тип нужен, чтобы задача Celery
+    отличила отмену от настоящего сбоя и не пыталась ретраить.
+    """
+
+    http_status = 409
+    code = "JOB_CANCELLED"
+    retriable = False
 
 
 class ConflictError(HighlightError):

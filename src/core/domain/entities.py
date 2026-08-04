@@ -166,6 +166,10 @@ class Job:
     stages: Mapping[JobStage, StageState] = field(default_factory=dict)
     params: Mapping[str, object] = field(default_factory=dict)
     params_hash: str = ""
+    #: Идентификатор корневой задачи Celery. Нужен ровно для одного:
+    #: отменить запущенный конвейер. Хранится в базе, а не в памяти API,
+    #: потому что отменять джоб будет, скорее всего, другая реплика.
+    celery_root_id: str | None = None
     trace_id: UUID | None = None
     error: Mapping[str, object] | None = None
     #: Что джоб израсходовал у внешних платных сервисов: токены, деньги,

@@ -234,7 +234,7 @@ class TestStageState:
         assert state.duration_sec is not None
         assert stored.status is JobStatus.RUNNING
         # Вес detect_scenes = 7 из 100 (док 04, §4.8).
-        assert stored.progress == pytest.approx(7.0)
+        assert stored.progress == pytest.approx(10.0)
 
     async def test_failure_marks_job_failed_and_reraises(
         self, video: Video, media: LocalMedia, tmp_path: Path

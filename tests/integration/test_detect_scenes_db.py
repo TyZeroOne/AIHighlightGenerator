@@ -164,7 +164,7 @@ class TestPersistence:
         assert state.status == "succeeded"
         assert state.duration_sec is not None and state.duration_sec >= 0
         assert stored.stage is JobStage.DETECT_SCENES
-        assert stored.progress == pytest.approx(7.0)  # вес этапа из STAGE_WEIGHTS
+        assert stored.progress == pytest.approx(10.0)  # вес этапа из STAGE_WEIGHTS
         assert stored.params == {"profile": "default"}
 
     async def test_rerun_replaces_scenes_without_violating_unique_index(

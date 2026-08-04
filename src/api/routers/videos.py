@@ -11,6 +11,7 @@ from fastapi import APIRouter, File, Query, Request, Response, UploadFile, statu
 from fastapi.responses import RedirectResponse, StreamingResponse
 
 from api.deps import ContainerDep, CurrentUser
+from api.ratelimit import rate_limit
 from api.schemas.video import (
     RegisterLocalRequest,
     VideoListResponse,
@@ -22,7 +23,7 @@ from core.usecases.upload_video import mime_for, stream_to_file
 
 __all__ = ["router"]
 
-router = APIRouter(prefix="/api/v1", tags=["videos"])
+router = APIRouter(prefix="/api/v1", tags=["videos"], dependencies=[rate_limit()])
 
 READ_CHUNK = 1 << 20  # 1 МиБ
 

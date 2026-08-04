@@ -15,12 +15,13 @@ from fastapi import Path as PathParam
 from pydantic import BaseModel, Field
 
 from api.deps import ContainerDep, CurrentUser
+from api.ratelimit import rate_limit
 from api.schemas.video import PartAccepted, UploadSessionResponse, VideoResponse
 from core.usecases.chunked_upload import MAX_PARTS
 
 __all__ = ["router"]
 
-router = APIRouter(prefix="/api/v1/upload", tags=["uploads"])
+router = APIRouter(prefix="/api/v1/upload", tags=["uploads"], dependencies=[rate_limit()])
 
 
 class InitUploadRequest(BaseModel):

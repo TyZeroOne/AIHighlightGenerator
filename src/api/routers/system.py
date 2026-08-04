@@ -32,6 +32,17 @@ class PlanLayer(BaseModel):
     analyzers: list[str]
 
 
+class ProfileInfo(BaseModel):
+    """Профиль скоринга — то, что можно передать в ``POST /jobs``."""
+
+    name: str
+    group_weights: dict[str, float]
+    min_duration_sec: float
+    max_duration_sec: float
+    min_score: float
+    max_clips: int
+
+
 @router.get(
     "/analyzers",
     response_model=list[AnalyzerInfo],
@@ -73,4 +84,31 @@ async def analysis_plan(
     )
     return [
         PlanLayer(layer=i, analyzers=[cls.key for cls in layer]) for i, layer in enumerate(layers)
+    ]
+
+
+@router.get(
+    "/profiles",
+    response_model=list[ProfileInfo],
+    summary="Профили скоринга",
+)
+async def list_profiles() -> list[ProfileInfo]:
+    """Какие профили доступны и чем они отличаются.
+
+    Веса групп отдаются наружу намеренно: без них список профилей —
+    это пять слов без содержания, и выбрать между ``movie`` и ``podcast``
+    можно только методом проб.
+    """
+    from highlight_detector.profiles import PROFILES
+
+    return [
+        ProfileInfo(
+            name=profile.name,
+            group_weights=dict(profile.group_weights),
+            min_duration_sec=profile.min_duration_sec,
+            max_duration_sec=profile.max_duration_sec,
+            min_score=profile.min_score,
+            max_clips=profile.max_clips,
+        )
+        for profile in sorted(PROFILES.values(), key=lambda item: item.name)
     ]
