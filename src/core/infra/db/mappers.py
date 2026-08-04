@@ -146,6 +146,7 @@ def job_to_domain(row: JobORM) -> Job:
         params_hash=row.params_hash,
         trace_id=row.trace_id,
         error=row.error,
+        cost=dict(row.cost or {}),
         created_at=row.created_at,
     )
 
@@ -164,6 +165,7 @@ def job_to_orm_values(job: Job) -> dict[str, object]:
         "params_hash": job.params_hash,
         "trace_id": job.trace_id,
         "error": dict(job.error) if job.error else None,
+        "cost": dict(job.cost),
     }
 
 

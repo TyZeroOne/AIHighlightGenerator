@@ -216,6 +216,48 @@ async def _transcribe(
     return 0
 
 
+async def _rank(*, job_id: UUID, show: int) -> int:
+    """Оценить сцены языковой моделью."""
+    container = get_container()
+    settings = container.settings
+    print(f"провайдер: {settings.llm_provider}")
+    if settings.llm_provider == "openrouter":
+        print(f"модель   : {settings.openrouter_model}")
+
+    result = await container.rank_scenes.execute(job_id)
+
+    if result.skipped:
+        print("этап пропущен")
+        return 0
+    if result.reused:
+        print("этап уже выполнен ранее")
+        return 0
+
+    print(f"сцен     : {result.scenes_total}, отправлено {result.scenes_sent}")
+    print(f"оценено  : {result.scenes_scored} за {result.duration_sec:.1f} с")
+    print(f"батчей   : {result.batches}")
+    print(f"расход   : {dict(result.cost)}")
+    if result.degraded:
+        print("! модель недоступна, джоб пойдёт по эвристике", file=sys.stderr)
+    for error in result.failed:
+        print(f"  ! {error}", file=sys.stderr)
+
+    if show:
+        async with container.uow() as uow:
+            scenes = await uow.scenes.list_for_job(job_id)
+        rated = sorted(
+            (scene for scene in scenes if scene.llm_score is not None),
+            key=lambda scene: -(scene.llm_score or 0),
+        )
+        print("\nлучшие сцены по мнению модели:")
+        for scene in rated[:show]:
+            print(
+                f"  {scene.llm_score:3.0f} {scene.category or '—':12} "
+                f"{format_timecode(scene.range.start)} | {scene.reason or ''}"
+            )
+    return 0
+
+
 async def _analyze(*, job_id: UUID, groups: Sequence[str], show: int) -> int:
     """Посчитать признаки по уже разбитому на сцены джобу."""
     container = get_container()
@@ -294,6 +336,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     analyze.add_argument("--show", type=int, default=10, help="Сколько сцен напечатать")
 
+    rank = sub.add_parser("rank", help="Оценить сцены языковой моделью")
+    rank.add_argument("--job-id", required=True, type=UUID)
+    rank.add_argument("--show", type=int, default=10, help="Сколько сцен напечатать")
+
     args = parser.parse_args(argv)
     configure_logging(level="WARNING", fmt="console")
 
@@ -315,6 +361,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "analyze":
         groups = [item.strip() for item in args.groups.split(",") if item.strip()]
         return asyncio.run(_analyze(job_id=args.job_id, groups=groups, show=args.show))
+    if args.command == "rank":
+        return asyncio.run(_rank(job_id=args.job_id, show=args.show))
     return 1
 
 

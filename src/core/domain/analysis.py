@@ -16,6 +16,7 @@ __all__ = [
     "ARTIFACT_VIDEO",
     "AnalysisContext",
     "LLMVerdict",
+    "RankingOutcome",
     "RenderSpec",
     "SceneSummary",
     "ScoringProfile",
@@ -118,6 +119,30 @@ class LLMVerdict:
     score: float
     category: str
     reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class RankingOutcome:
+    """Результат опроса модели по всем сценам джоба.
+
+    Живёт в домене, а не в пакете ``llm``, потому что через него сценарий
+    этапа разговаривает с любым ранжировщиком: сменится провайдер или способ
+    батчинга — тип результата останется тем же.
+    """
+
+    verdicts: Sequence[LLMVerdict] = field(default_factory=tuple)
+    #: Сколько сцен реально ушло в модель после фильтра.
+    scenes_sent: int = 0
+    batches: int = 0
+    #: Батчи, не давшие результата. Не ошибка этапа: остальные вердикты
+    #: сохраняются, а сцены без вердикта остаются с одной эвристикой.
+    failed: Sequence[str] = field(default_factory=tuple)
+    #: Расход: токены, запросы, деньги. Пишется в ``jobs.cost``.
+    cost: Mapping[str, object] = field(default_factory=dict)
+
+    @property
+    def all_failed(self) -> bool:
+        return self.batches > 0 and len(self.failed) == self.batches
 
 
 @dataclass(frozen=True, slots=True)

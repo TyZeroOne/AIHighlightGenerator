@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from core import registry
@@ -24,6 +24,7 @@ from core.domain.errors import DependencyResolutionError
 from core.infra.db.session import create_engine, create_session_factory
 from core.infra.db.uow import SqlAlchemyUnitOfWork
 from core.logging import configure_logging, get_logger
+from core.ports.llm import LLMProvider, SceneRanker
 from core.ports.media import AudioExtractor, KeyframeExtractor, SceneDetector
 from core.ports.repository import UnitOfWork
 from core.ports.source import MediaProbe, SourceProvider
@@ -37,6 +38,7 @@ from core.usecases.chunked_upload import (
     UploadPart,
 )
 from core.usecases.detect_scenes import DetectScenes, SceneDetectionSettings
+from core.usecases.rank import RankScenes
 from core.usecases.transcribe import ExtractAudio, Transcribe
 from core.usecases.upload_video import (
     DeleteVideo,
@@ -402,10 +404,61 @@ class Container:
             needs=frozenset({ARTIFACT_VIDEO}),
         )
 
-    # ------------------------------------------------------- Этап 6+
+    # ------------------------------------------------------- Этап 6
     @cached_property
-    def llm(self) -> Any:
-        raise NotImplementedError("LLMProvider будет реализован на Этапе 6")
+    def llm(self) -> LLMProvider:
+        """Провайдер языковой модели — единственное место, где выбирается,
+        какая именно модель отвечает за ранжирование.
+
+        Сценарий этапа знает только порт. Замена OpenRouter на Claude —
+        одна переменная окружения, ни строчки в конвейере.
+        """
+        settings = self.settings
+        key = settings.llm_api_key
+        if not key:
+            raise DependencyResolutionError(
+                f"Не задан ключ провайдера {settings.llm_provider!r}. "
+                "Укажите OPENROUTER_API_KEY или ANTHROPIC_API_KEY, "
+                "либо выключите LLM через LLM_ENABLED=false.",
+                provider=settings.llm_provider,
+            )
+
+        if settings.llm_provider == "openrouter":
+            from llm.openrouter import OpenRouterProvider
+
+            return OpenRouterProvider(
+                api_key=key,
+                model=settings.openrouter_model,
+                base_url=settings.openrouter_base_url,
+                max_tokens=settings.llm_max_tokens,
+                timeout_sec=settings.llm_timeout_sec,
+                max_retries=settings.llm_max_retries,
+            )
+
+        raise DependencyResolutionError(
+            f"Провайдер {settings.llm_provider!r} ещё не реализован",
+            provider=settings.llm_provider,
+        )
+
+    def scene_ranker(self) -> SceneRanker:
+        """Ранжировщик сцен. Метод, а не свойство: провайдер копит расход
+        внутри себя, и каждому джобу нужен свой экземпляр — иначе стоимость
+        второго джоба включила бы токены первого."""
+        from llm.ranker import BatchRanker
+
+        return BatchRanker(
+            provider=self.llm,
+            batch_size=self.settings.llm_batch_size,
+        )
+
+    @cached_property
+    def rank_scenes(self) -> RankScenes:
+        return RankScenes(
+            uow_factory=self.uow,
+            ranker_factory=self.scene_ranker,
+            enabled=self.settings.llm_enabled,
+            profile=self.settings.default_profile,
+        )
 
     # ------------------------------------------------------ жизненный цикл
     async def aclose(self) -> None:

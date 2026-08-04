@@ -138,6 +138,11 @@ class Job:
     params_hash: str = ""
     trace_id: UUID | None = None
     error: Mapping[str, object] | None = None
+    #: Что джоб израсходовал у внешних платных сервисов: токены, деньги,
+    #: число запросов. Хранится на джобе, а не в логах, потому что вопрос
+    #: «сколько стоила обработка этого видео» задают через месяц, когда
+    #: логи уже ротировались (док 06, §6.9).
+    cost: Mapping[str, object] = field(default_factory=dict)
     created_at: datetime | None = None
 
     def is_stage_done(self, stage: JobStage) -> bool:

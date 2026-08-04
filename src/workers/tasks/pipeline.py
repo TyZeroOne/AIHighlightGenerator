@@ -29,6 +29,7 @@ __all__ = [
     "analyze_vision",
     "detect_scenes",
     "extract_audio",
+    "llm_rank",
     "transcribe",
 ]
 
@@ -49,6 +50,14 @@ class AnalyzeAudioTask(PipelineTask):
 
 class AnalyzeSpeechTask(PipelineTask):
     stage = JobStage.ANALYZE_SPEECH
+
+
+class LLMRankTask(PipelineTask):
+    stage = JobStage.LLM_RANK
+    # Ретраи здесь не нужны: сценарий сам переживает недоступность модели
+    # и переводит джоб на эвристику. Повтор задачи означал бы вторую оплату
+    # тех же токенов ради того же результата.
+    max_retries = 0
 
 
 class AnalyzeVisionTask(PipelineTask):
@@ -182,3 +191,30 @@ def analyze_speech(self: AnalyzeSpeechTask, job_id: str) -> dict[str, Any]:
 def analyze_vision(self: AnalyzeVisionTask, job_id: str) -> dict[str, Any]:
     """Видеопризнаки: движение, склейки, лица, динамика кадра."""
     return _analysis_payload(run_async(get_container().analyze_vision.execute(UUID(job_id))))
+
+
+@celery_app.task(
+    base=LLMRankTask,
+    bind=True,
+    name="workers.tasks.pipeline.llm_rank",
+)
+def llm_rank(self: LLMRankTask, job_id: str) -> dict[str, Any]:
+    """Ранжирование сцен языковой моделью.
+
+    Единственный этап конвейера, зависящий от внешнего платного сервиса.
+    Его недоступность не проваливает джоб: сцены остаются с эвристикой,
+    джоб получает ``partial`` (док 06, §6.10).
+    """
+    result = run_async(get_container().rank_scenes.execute(UUID(job_id)))
+    return {
+        "job_id": str(result.job_id),
+        "scenes_total": result.scenes_total,
+        "scenes_sent": result.scenes_sent,
+        "scenes_scored": result.scenes_scored,
+        "batches": result.batches,
+        "duration_sec": result.duration_sec,
+        "cost": dict(result.cost),
+        "skipped": result.skipped,
+        "reused": result.reused,
+        "degraded": result.degraded,
+    }

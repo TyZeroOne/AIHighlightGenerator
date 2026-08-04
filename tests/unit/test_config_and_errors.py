@@ -40,8 +40,30 @@ class TestSettings:
             Settings(_env_file=None, app_env="prod")  # type: ignore[call-arg]
 
     def test_prod_requires_llm_key_when_llm_enabled(self) -> None:
-        with pytest.raises(ValueError, match="ANTHROPIC_API_KEY"):
+        """Какой именно ключ обязателен, зависит от провайдера — с Этапа 6
+        их два, и сообщение должно называть тот, что выбран."""
+        with pytest.raises(ValueError, match="openrouter"):
             Settings(_env_file=None, app_env="prod", secret_key="s3cret", llm_enabled=True)  # type: ignore[call-arg]
+
+    def test_prod_with_claude_provider_names_its_own_key(self) -> None:
+        with pytest.raises(ValueError, match="claude"):
+            Settings(  # type: ignore[call-arg]
+                _env_file=None,
+                app_env="prod",
+                secret_key="s3cret",
+                llm_enabled=True,
+                llm_provider="claude",
+            )
+
+    def test_provider_key_is_resolved_by_provider(self) -> None:
+        settings = Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            llm_provider="openrouter",
+            openrouter_api_key="or-key",
+            anthropic_api_key="anthropic-key",
+        )
+
+        assert settings.llm_api_key == "or-key"
 
     def test_prod_without_llm_does_not_require_key(self) -> None:
         settings = Settings(  # type: ignore[call-arg]

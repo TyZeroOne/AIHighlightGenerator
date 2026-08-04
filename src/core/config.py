@@ -200,14 +200,37 @@ class Settings(BaseSettings):
     score_beta: float = 0.5
     score_gamma: float = 0.1
 
-    # --- LLM (Этап 6+) ---
+    # --- LLM (Этап 6) ---
+    #: Какой провайдер отвечает за ранжирование. Порт ``LLMProvider`` один,
+    #: реализаций может быть несколько: ``openrouter`` даёт бесплатные модели
+    #: и годится для разработки, ``claude`` — качество и гарантию схемы.
+    llm_provider: Literal["openrouter", "claude"] = "openrouter"
+    llm_enabled: bool = True
+
+    #: Общие для всех провайдеров параметры запроса.
+    llm_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
+    #: Потолок на ответ. У моделей с «думанием» он ограничивает сумму
+    #: размышления и ответа, поэтому запас нужен заметный: батч из 40 сцен
+    #: это до 2400 токенов одних вердиктов.
+    llm_max_tokens: int = 16000
+    #: Сколько сцен уходит в один запрос. Больше — дешевле по системному
+    #: промпту, но выше риск, что модель собьётся с нумерации.
+    llm_batch_size: int = 40
+    llm_timeout_sec: float = 180.0
+    llm_max_retries: int = 3
+
+    # --- OpenRouter ---
+    openrouter_api_key: str | None = None
+    #: Замер на задаче ранжирования (Этап 6): точные категории, лаконичные
+    #: обоснования, 16.6 с на батч. Строгие схемы поддерживает — но, в отличие
+    #: от Claude, соблюдает их не API, а сама модель.
+    openrouter_model: str = "google/gemma-4-26b-a4b-it:free"
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+
+    # --- Claude ---
     anthropic_api_key: str | None = None
     llm_model: str = "claude-opus-5"
-    llm_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
-    llm_max_tokens: int = 8000
-    llm_batch_size: int = 40
     llm_use_batch_api: bool = True
-    llm_enabled: bool = True
 
     # --- лимиты ---
     max_concurrent_jobs: int = 2
@@ -224,8 +247,10 @@ class Settings(BaseSettings):
         if self.app_env is AppEnv.PROD:
             if self.secret_key == "dev-insecure-change-me":
                 raise ValueError("SECRET_KEY обязателен в проде")
-            if self.llm_enabled and not self.anthropic_api_key:
-                raise ValueError("ANTHROPIC_API_KEY обязателен при LLM_ENABLED=true в проде")
+            if self.llm_enabled and not self.llm_api_key:
+                raise ValueError(
+                    f"Ключ провайдера {self.llm_provider!r} обязателен при LLM_ENABLED=true в проде"
+                )
 
         if self.scene_min_len_sec <= 0:
             raise ValueError(
@@ -276,6 +301,17 @@ class Settings(BaseSettings):
     @property
     def disabled_analyzers_set(self) -> frozenset[str]:
         return frozenset(x.strip() for x in self.analyzers_disabled.split(",") if x.strip())
+
+    @property
+    def llm_api_key(self) -> str | None:
+        """Ключ выбранного провайдера.
+
+        Отдельное свойство, чтобы вызывающему коду не приходилось помнить,
+        какая переменная окружения относится к какому провайдеру.
+        """
+        return (
+            self.openrouter_api_key if self.llm_provider == "openrouter" else self.anthropic_api_key
+        )
 
     @property
     def local_source_roots(self) -> tuple[Path, ...]:
