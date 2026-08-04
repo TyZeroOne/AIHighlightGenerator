@@ -9,7 +9,7 @@ from fastapi import FastAPI
 
 from api.errors import install_error_handlers
 from api.middleware import TraceMiddleware
-from api.routers import health, jobs, system, uploads, videos
+from api.routers import clips, health, jobs, system, uploads, videos
 from core import __version__
 from core.container import get_container
 from core.logging import get_logger
@@ -60,6 +60,7 @@ def create_app() -> FastAPI:
     application.include_router(videos.router)
     application.include_router(uploads.router)
     application.include_router(jobs.router)
+    application.include_router(clips.router)
 
     return application
 

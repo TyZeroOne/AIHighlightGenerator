@@ -200,6 +200,47 @@ class Settings(BaseSettings):
     score_beta: float = 0.5
     score_gamma: float = 0.1
 
+    # --- нарезка клипов (Этап 8) ---
+    #: x264, а не x265/AV1: клип уходит на площадку, которая всё равно
+    #: перекодирует его под себя, и единственное, что нам нужно от кодека, —
+    #: чтобы файл открылся везде без разговоров.
+    render_video_codec: str = "libx264"
+    render_audio_codec: str = "aac"
+    #: 20 — визуально без потерь на материале, который уже пережил одно
+    #: сжатие. Меньше смысла нет: улучшать нечего, а вес растёт.
+    render_crf: int = 20
+    render_preset: str = "medium"
+    render_audio_bitrate: str = "192k"
+    #: Нормализовать громкость к −14 LUFS (уровень YouTube и Spotify).
+    #: Выключать осмысленно, если исходник уже сведён.
+    render_normalize_audio: bool = True
+    render_loudness_lufs: float = -14.0
+    #: Собирать ли вертикальную версию 1080×1920.
+    render_vertical: bool = True
+    render_thumbnails: bool = True
+    render_thumbnail_width: int = 640
+    #: Сколько клипов рендерится одновременно. Не «по числу ядер»: ffmpeg
+    #: сам занимает все ядра одним файлом, и десять параллельных процессов
+    #: не ускорят работу, а поделят те же ядра и умножат память.
+    render_concurrency: int = 2
+    #: Потоки одного ffmpeg. 0 — пусть решает сам.
+    render_threads: int = 0
+    #: Резать копированием потока, когда это возможно. Выключено: замер
+    #: показал отклонение длительности +0.123 с против 0.000 с при
+    #: перекодировании — копия режет по границам пакетов, а не кадров,
+    #: и в требуемые ±0.05 с не укладывается (см. разбор Этапа 8).
+    render_allow_stream_copy: bool = False
+
+    #: Как часто пересчитывается положение вертикального кропа, кадров/с.
+    #: Лица не телепортируются: четырёх измерений в секунду хватает,
+    #: а разбор каждого кадра стоил бы дороже самого кодирования.
+    reframe_sample_fps: float = 4.0
+    #: Окно сглаживания траектории, секунды.
+    reframe_smooth_sec: float = 1.2
+    #: Предел скорости кропа в долях ширины исходного кадра за секунду.
+    #: Без него камера дёргается за каждым ложным срабатыванием детектора.
+    reframe_max_speed: float = 0.25
+
     # --- LLM (Этап 6) ---
     #: Какой провайдер отвечает за ранжирование. Порт ``LLMProvider`` один,
     #: реализаций может быть несколько: ``openrouter`` даёт бесплатные модели
@@ -266,6 +307,17 @@ class Settings(BaseSettings):
             raise ValueError(
                 "WHISPER_CHUNK_OVERLAP_SEC должен быть меньше WHISPER_CHUNK_SEC, получено "
                 f"{self.whisper_chunk_overlap_sec} >= {self.whisper_chunk_sec}"
+            )
+
+        if not 0 <= self.render_crf <= 51:
+            raise ValueError(f"RENDER_CRF вне диапазона x264 (0..51): {self.render_crf}")
+        if self.render_concurrency < 1:
+            raise ValueError(
+                f"RENDER_CONCURRENCY должен быть не меньше 1: {self.render_concurrency}"
+            )
+        if self.reframe_sample_fps <= 0:
+            raise ValueError(
+                f"REFRAME_SAMPLE_FPS должен быть положительным: {self.reframe_sample_fps}"
             )
 
         total = self.score_alpha + self.score_beta + self.score_gamma

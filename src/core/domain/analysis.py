@@ -17,7 +17,6 @@ __all__ = [
     "AnalysisContext",
     "LLMVerdict",
     "RankingOutcome",
-    "RenderSpec",
     "SceneSummary",
     "ScoringProfile",
     "VideoContext",
@@ -143,15 +142,3 @@ class RankingOutcome:
     @property
     def all_failed(self) -> bool:
         return self.batches > 0 and len(self.failed) == self.batches
-
-
-@dataclass(frozen=True, slots=True)
-class RenderSpec:
-    """Параметры рендера клипа."""
-
-    width: int | None = None
-    height: int | None = None
-    crf: int = 20
-    preset: str = "medium"
-    audio_bitrate: str = "192k"
-    burn_subtitles_path: Path | None = None

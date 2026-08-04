@@ -14,6 +14,9 @@ from uuid import UUID
 
 from core.domain.enums import (
     STAGE_WEIGHTS,
+    AssetKind,
+    AssetOwnerType,
+    ClipStatus,
     JobMode,
     JobStage,
     JobStatus,
@@ -25,6 +28,7 @@ from core.domain.media import MediaInfo
 from core.domain.values import FeatureValue, Score, TimeRange
 
 __all__ = [
+    "Asset",
     "Clip",
     "ClipMetadata",
     "Highlight",
@@ -66,6 +70,32 @@ class Video:
     def is_usable(self) -> bool:
         """Готово ли видео к анализу. Проверяется перед постановкой джоба."""
         return self.status is VideoStatus.READY
+
+
+@dataclass(frozen=True, slots=True)
+class Asset:
+    """Файловый артефакт: клип, превью, субтитры, исходник.
+
+    Обычный неизменяемый объект, а не строка ORM, и это оказалось важно
+    практически. Пока репозиторий отдавал наружу ORM-объекты, они
+    оставались привязаны к сессии: после выхода из ``async with`` любое
+    обращение к полю падало ``DetachedInstanceError`` — причём не сразу,
+    а только там, где атрибут успел протухнуть после коммита. Простой
+    объект нельзя «отвязать»: он не знает ни о какой сессии.
+    """
+
+    id: UUID
+    owner_type: AssetOwnerType
+    owner_id: UUID
+    kind: AssetKind
+    storage_key: str
+    mime: str = "application/octet-stream"
+    size_bytes: int = 0
+    meta: Mapping[str, object] = field(default_factory=dict)
+    #: Когда артефакт станет мусором. ``None`` — хранить бессрочно.
+    #: Поле домена, а не деталь хранения: «через сколько удалить
+    #: промежуточный WAV» — это политика, а не свойство таблицы.
+    expires_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,3 +287,15 @@ class Clip:
     reason: str
     metadata: ClipMetadata | None = None
     scene_ids: tuple[UUID, ...] = ()
+    #: Состояние рендера. Отбор (Этап 7) создаёт клип в ``pending``:
+    #: отрезок выбран, файла ещё нет. Нарезка (Этап 8) доводит его
+    #: до ``ready`` или ``failed`` — по каждому клипу отдельно, потому
+    #: что падение одного не отменяет остальные.
+    status: ClipStatus = ClipStatus.PENDING
+    error: str | None = None
+
+    def rendered(self) -> Clip:
+        return replace(self, status=ClipStatus.READY, error=None)
+
+    def broken(self, error: str) -> Clip:
+        return replace(self, status=ClipStatus.FAILED, error=error[:500])

@@ -18,6 +18,7 @@ from typing import Any
 from uuid import UUID
 
 from core.domain.entities import (
+    Asset,
     Clip,
     ClipMetadata,
     Job,
@@ -31,6 +32,7 @@ from core.domain.enums import JobStage
 from core.domain.media import MediaInfo, TranscriptSegment, TranscriptWord
 from core.domain.values import FeatureValue, Score, TimeRange
 from core.infra.db.models import (
+    AssetORM,
     ClipORM,
     JobORM,
     SceneORM,
@@ -41,6 +43,7 @@ from core.infra.db.models import (
 )
 
 __all__ = [
+    "asset_to_domain",
     "clip_to_domain",
     "clip_to_orm_values",
     "job_to_domain",
@@ -393,6 +396,8 @@ def clip_to_domain(row: ClipORM, scene_ids: Sequence[UUID] = ()) -> Clip:
         reason=row.reason or "",
         metadata=metadata,
         scene_ids=tuple(scene_ids),
+        status=row.status,
+        error=(row.error or {}).get("message") if row.error else None,
     )
 
 
@@ -411,4 +416,29 @@ def clip_to_orm_values(clip: Clip) -> dict[str, object]:
         "title": metadata.title if metadata else None,
         "description": metadata.description if metadata else None,
         "hashtags": list(metadata.hashtags) if metadata else None,
+        "status": clip.status,
+        # Ошибка хранится объектом, а не строкой: колонка jsonb, и когда
+        # к сообщению понадобится добавить код или подсказку, это будет
+        # ключом в словаре, а не миграцией.
+        "error": {"message": clip.error} if clip.error else None,
     }
+
+
+# ----------------------------------------------------------------- asset
+def asset_to_domain(row: AssetORM) -> Asset:
+    """Строка ORM → неизменяемый доменный объект.
+
+    Отдавать наружу саму строку нельзя: она привязана к сессии и после
+    её закрытия отдаёт `DetachedInstanceError` вместо значения поля.
+    """
+    return Asset(
+        id=row.id,
+        owner_type=row.owner_type,
+        owner_id=row.owner_id,
+        kind=row.kind,
+        storage_key=row.storage_key,
+        mime=row.mime,
+        size_bytes=row.size_bytes,
+        meta=row.meta or {},
+        expires_at=row.expires_at,
+    )

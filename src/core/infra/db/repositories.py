@@ -14,10 +14,11 @@ from uuid import UUID, uuid4
 from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.domain.entities import Clip, Job, Scene, UploadSession, User, Video
+from core.domain.entities import Asset, Clip, Job, Scene, UploadSession, User, Video
 from core.domain.enums import AssetKind, AssetOwnerType, JobStatus, VideoStatus
 from core.domain.media import Transcript
 from core.infra.db.mappers import (
+    asset_to_domain,
     clip_to_domain,
     clip_to_orm_values,
     job_to_domain,
@@ -366,20 +367,30 @@ class AssetRepository:
         await self._session.flush()
         return asset.id
 
-    async def get(self, asset_id: UUID) -> AssetORM | None:
-        return await self._session.get(AssetORM, asset_id)
+    async def get(self, asset_id: UUID) -> Asset | None:
+        row = await self._session.get(AssetORM, asset_id)
+        return asset_to_domain(row) if row is not None else None
 
     async def list_for_owner(
         self,
         owner_type: AssetOwnerType,
         owner_id: UUID,
-    ) -> Sequence[AssetORM]:
+    ) -> Sequence[Asset]:
+        """Артефакты владельца — доменными объектами, а не строками ORM.
+
+        Разница не косметическая. Строка ORM живёт только внутри сессии:
+        после выхода из ``async with`` обращение к её полю падает
+        ``DetachedInstanceError``, причём выборочно — там, где атрибут
+        успел протухнуть после коммита. Ровно так и упал первый прогон
+        нарезки, распечатывая готовые клипы.
+        """
         stmt = select(AssetORM).where(
             AssetORM.owner_type == owner_type,
             AssetORM.owner_id == owner_id,
             AssetORM.deleted_at.is_(None),
         )
-        return list((await self._session.execute(stmt)).scalars().all())
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [asset_to_domain(row) for row in rows]
 
     async def delete_for_owner(self, owner_type: AssetOwnerType, owner_id: UUID) -> None:
         stmt = delete(AssetORM).where(

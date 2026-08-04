@@ -23,7 +23,7 @@ from uuid import UUID, uuid4
 
 from core.container import get_container
 from core.domain.entities import Job
-from core.domain.enums import JobStatus
+from core.domain.enums import AssetOwnerType, JobStatus
 from core.domain.timecode import format_timecode
 from core.logging import configure_logging
 
@@ -328,6 +328,61 @@ async def _select(
     return 0
 
 
+async def _render(*, job_id: UUID, enqueue: bool, show: int) -> int:
+    """Нарезать отобранные моменты в файлы.
+
+    ``--enqueue`` отправляет задачу воркеру. Это не украшение: рендер
+    десяти клипов идёт минутами, и запущенный через ``docker exec``
+    процесс умрёт вместе с клиентом при первом обрыве терминала —
+    ровно так уже терялась транскрипция на Этапе 4.
+    """
+    container = get_container()
+
+    if enqueue:
+        from workers.tasks.pipeline import render_clips
+
+        async_result = render_clips.delay(str(job_id))
+        print(f"задача   : {async_result.id}")
+        print("следите  : docker compose logs -f worker-cpu")
+        return 0
+
+    result = await container.render_clips.execute(job_id)
+    if result.skipped:
+        print("рендер   : пропущен (нет клипов — сначала `manage select`)")
+        return 1
+    if result.reused:
+        print("рендер   : уже выполнен ранее")
+        return 0
+
+    print(f"собрано  : {result.rendered} из {result.clips_total}, ошибок {result.failed}")
+    print(f"вертикаль: {result.vertical}, превью {result.thumbnails}")
+    if result.modes:
+        modes = ", ".join(f"{name} {count}" for name, count in sorted(result.modes.items()))
+        print(f"режимы   : {modes}")
+    print(f"время    : {result.duration_sec:.1f} с")
+    for warning in result.warnings:
+        print(f"  ! {warning}", file=sys.stderr)
+
+    if show:
+        async with container.uow() as uow:
+            clips = await uow.clips.list_for_job(job_id)
+            assets = {
+                clip.id: await uow.assets.list_for_owner(AssetOwnerType.CLIP, clip.id)
+                for clip in clips
+            }
+        print("\nклипы:")
+        for clip in clips[:show]:
+            keys = ", ".join(sorted(asset.kind.value for asset in assets.get(clip.id, ())))
+            print(
+                f"  {clip.rank:2d}. {clip.status.value:8} "
+                f"{format_timecode(clip.range.start)} → {format_timecode(clip.range.end)} "
+                f"({clip.range.duration:5.1f} с) {keys or '—'}"
+            )
+            if clip.error:
+                print(f"      ! {clip.error}", file=sys.stderr)
+    return 0
+
+
 async def _analyze(*, job_id: UUID, groups: Sequence[str], show: int) -> int:
     """Посчитать признаки по уже разбитому на сцены джобу."""
     container = get_container()
@@ -420,6 +475,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     select.add_argument("--show", type=int, default=10, help="Сколько клипов напечатать")
 
+    render = sub.add_parser("render", help="Нарезать отобранные моменты в файлы")
+    render.add_argument("--job-id", required=True, type=UUID)
+    render.add_argument(
+        "--enqueue",
+        action="store_true",
+        help="Отправить задачу в Celery вместо выполнения на месте",
+    )
+    render.add_argument("--show", type=int, default=10, help="Сколько клипов напечатать")
+
     args = parser.parse_args(argv)
     configure_logging(level="WARNING", fmt="console")
 
@@ -452,6 +516,8 @@ def main(argv: list[str] | None = None) -> int:
                 show=args.show,
             )
         )
+    if args.command == "render":
+        return asyncio.run(_render(job_id=args.job_id, enqueue=args.enqueue, show=args.show))
     return 1
 
 

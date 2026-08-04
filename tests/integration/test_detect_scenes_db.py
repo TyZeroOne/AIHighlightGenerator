@@ -119,12 +119,13 @@ class TestPersistence:
         assert result.scene_count == 3
         async with container.uow() as uow:
             scenes = await uow.scenes.list_for_job(job.id)
-            # Артефакты читаем внутри сессии: строки ORM после её закрытия
-            # отвязаны, и обращение к полю попыталось бы сходить в БД.
-            assets = [
-                (asset.kind, asset.storage_key)
-                for asset in await uow.assets.list_for_owner(AssetOwnerType.JOB, job.id)
-            ]
+            records = await uow.assets.list_for_owner(AssetOwnerType.JOB, job.id)
+
+        # Поля читаются УЖЕ ПОСЛЕ закрытия сессии, и это регресс дефекта,
+        # найденного живым прогоном Этапа 8: репозиторий отдавал наружу
+        # строки ORM, а те после коммита протухают и падают
+        # `DetachedInstanceError` при обращении к любому полю.
+        assets = [(asset.kind, asset.storage_key) for asset in records]
 
         assert [scene.index for scene in scenes] == [0, 1, 2]
         assert [scene.range for scene in scenes] == SCENES

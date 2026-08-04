@@ -21,11 +21,18 @@ from core.config import Settings, get_settings
 from core.domain.analysis import ARTIFACT_AUDIO, ARTIFACT_TRANSCRIPT, ARTIFACT_VIDEO
 from core.domain.enums import JobStage
 from core.domain.errors import DependencyResolutionError
+from core.domain.render import RenderSpec
 from core.infra.db.session import create_engine, create_session_factory
 from core.infra.db.uow import SqlAlchemyUnitOfWork
 from core.logging import configure_logging, get_logger
 from core.ports.llm import LLMProvider, SceneRanker
-from core.ports.media import AudioExtractor, KeyframeExtractor, SceneDetector
+from core.ports.media import (
+    AudioExtractor,
+    ClipRenderer,
+    CropPlanner,
+    KeyframeExtractor,
+    SceneDetector,
+)
 from core.ports.repository import UnitOfWork
 from core.ports.source import MediaProbe, SourceProvider
 from core.ports.speech import Transcriber
@@ -39,6 +46,7 @@ from core.usecases.chunked_upload import (
 )
 from core.usecases.detect_scenes import DetectScenes, SceneDetectionSettings
 from core.usecases.rank import RankScenes
+from core.usecases.render import RenderClips, RenderSettings
 from core.usecases.score import ScoreScenes
 from core.usecases.select import SelectHighlights
 from core.usecases.transcribe import ExtractAudio, Transcribe
@@ -432,6 +440,69 @@ class Container:
             uow_factory=self.uow,
             selector=self.detector,
             profile=self.settings.default_profile,
+        )
+
+    # ------------------------------------------------------- Этап 8
+    @cached_property
+    def render_spec(self) -> RenderSpec:
+        """Параметры кодирования из конфига.
+
+        Один объект на все виды вывода: клипы одного джоба обязаны
+        звучать и выглядеть одинаково независимо от того, каким путём
+        они собрались.
+        """
+        settings = self.settings
+        return RenderSpec(
+            crf=settings.render_crf,
+            preset=settings.render_preset,
+            video_codec=settings.render_video_codec,
+            audio_codec=settings.render_audio_codec,
+            audio_bitrate=settings.render_audio_bitrate,
+            loudness_lufs=(
+                settings.render_loudness_lufs if settings.render_normalize_audio else None
+            ),
+            threads=settings.render_threads,
+        )
+
+    @cached_property
+    def clip_renderer(self) -> ClipRenderer:
+        from video_editor.renderer import FFmpegClipRenderer
+
+        return FFmpegClipRenderer(
+            binary=self.settings.ffmpeg_bin,
+            probe_binary=self.settings.ffprobe_bin,
+            thumbnail_width=self.settings.render_thumbnail_width,
+            allow_stream_copy=self.settings.render_allow_stream_copy,
+        )
+
+    @cached_property
+    def crop_planner(self) -> CropPlanner:
+        """Планировщик вертикального кадрирования.
+
+        Живёт в ``vision``, а не в ``video_editor``: это компьютерное
+        зрение, и ему нужен тот же детектор лиц, что и анализаторам
+        Этапа 5. Связывает их — вот эта строчка.
+        """
+        from vision.reframe import FaceCropPlanner
+
+        return FaceCropPlanner()
+
+    @cached_property
+    def render_clips(self) -> RenderClips:
+        settings = self.settings
+        return RenderClips(
+            uow_factory=self.uow,
+            renderer=self.clip_renderer,
+            storage=self.storage,
+            provider_resolver=self.resolve_provider,
+            workdir=self.workdir,
+            planner=self.crop_planner if settings.render_vertical else None,
+            settings=RenderSettings(
+                spec=self.render_spec,
+                vertical=settings.render_vertical,
+                thumbnails=settings.render_thumbnails,
+                concurrency=settings.render_concurrency,
+            ),
         )
 
     # ------------------------------------------------------- Этап 6

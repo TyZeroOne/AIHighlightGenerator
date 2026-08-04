@@ -54,6 +54,7 @@ __all__ = [
     "YuNetFaceDetector",
     "face_features",
     "pick_frames",
+    "shared_face_detector",
 ]
 
 log = get_logger(__name__)
@@ -124,7 +125,21 @@ def face_features(
 
 
 class YuNetFaceDetector:
-    """Детектор лиц YuNet поверх ``cv2.FaceDetectorYN``."""
+    """Детектор лиц YuNet поверх ``cv2.FaceDetectorYN``.
+
+    **Детекция сериализована замком, и это не перестраховка.** Объект
+    ``FaceDetectorYN`` держит внутри себя граф сети и буферы под текущий
+    размер входа — то есть изменяемое состояние. Пока детектор звали
+    из одного потока (анализаторы Этапа 5 идут по сценам по очереди),
+    это не проявлялось. На Этапе 8 два клипа поехали кадрироваться
+    параллельно, и OpenCV упал прямо в графе::
+
+        (-215:Assertion failed) buf.u == m.u in function 'forwardGraph'
+
+    Замок вместо детектора на поток: веса весят 232 КБ, но копия графа
+    на каждый поток — это ещё и своя память под буферы, а сама детекция
+    занимает малую часть времени рендера. Сериализовать дешевле.
+    """
 
     def __init__(self, *, repo_id: str, filename: str, score_threshold: float = 0.7) -> None:
         self._repo_id = repo_id
@@ -133,6 +148,7 @@ class YuNetFaceDetector:
         self._detector: Any | None = None
         self._size: tuple[int, int] | None = None
         self._lock = threading.Lock()
+        self._detect_lock = threading.Lock()
 
     def _load(self) -> Any:
         detector = self._detector
@@ -169,13 +185,16 @@ class YuNetFaceDetector:
     def detect(self, frame: Any) -> Sequence[tuple[float, float, float, float, float]]:
         detector = self._load()
         height, width = frame.shape[:2]
-        # Размер входа задаётся отдельно и обязан совпадать с кадром:
-        # иначе координаты уезжают молча, без единой ошибки.
-        if self._size != (width, height):
-            detector.setInputSize((width, height))
-            self._size = (width, height)
+        with self._detect_lock:
+            # Размер входа задаётся отдельно и обязан совпадать с кадром:
+            # иначе координаты уезжают молча, без единой ошибки. Заодно
+            # это вторая причина замка: между установкой размера и самой
+            # детекцией чужой поток не должен переставить его обратно.
+            if self._size != (width, height):
+                detector.setInputSize((width, height))
+                self._size = (width, height)
 
-        _, faces = detector.detect(frame)
+            _, faces = detector.detect(frame)
         if faces is None:
             return []
         return [
@@ -191,6 +210,9 @@ class HaarFaceDetector:
         self._min_neighbors = min_neighbors
         self._min_size = min_size
         self._cascade: Any | None = None
+        # Тот же замок и по той же причине, что у YuNet: общий каскад
+        # держит внутреннее состояние, а детектор один на процесс.
+        self._detect_lock = threading.Lock()
 
     def _load(self) -> Any:
         if self._cascade is not None:
@@ -210,12 +232,13 @@ class HaarFaceDetector:
 
         cascade = self._load()
         gray = frame if frame.ndim == 2 else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        found = cascade.detectMultiScale(
-            gray,
-            scaleFactor=1.1,
-            minNeighbors=self._min_neighbors,
-            minSize=(self._min_size, self._min_size),
-        )
+        with self._detect_lock:
+            found = cascade.detectMultiScale(
+                gray,
+                scaleFactor=1.1,
+                minNeighbors=self._min_neighbors,
+                minSize=(self._min_size, self._min_size),
+            )
         # Каскад не возвращает уверенность вовсе — ставим 1.0 и честно
         # помним, что это не то же самое, что уверенность YuNet.
         return [(float(x), float(y), float(w), float(h), 1.0) for x, y, w, h in found]
@@ -337,7 +360,7 @@ class FaceAnalyzer:
         if source is None or not scenes:
             return {}
 
-        faces = self._faces or _shared_face_detector()
+        faces = self._faces or shared_face_detector()
         people = self._people if self._people is not None else _shared_person_detector()
 
         features: dict[int, list[FeatureValue]] = {}
@@ -374,7 +397,7 @@ _PEOPLE: PeopleDetector | None = None
 _DETECTOR_LOCK = threading.Lock()
 
 
-def _shared_face_detector() -> FaceDetector:
+def shared_face_detector() -> FaceDetector:
     global _FACES
     detector = _FACES
     if detector is not None:

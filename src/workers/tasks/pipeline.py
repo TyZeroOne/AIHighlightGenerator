@@ -30,6 +30,7 @@ __all__ = [
     "detect_scenes",
     "extract_audio",
     "llm_rank",
+    "render_clips",
     "score_scenes",
     "select_highlights",
     "transcribe",
@@ -68,6 +69,15 @@ class LLMRankTask(PipelineTask):
     # и переводит джоб на эвристику. Повтор задачи означал бы вторую оплату
     # тех же токенов ради того же результата.
     max_retries = 0
+
+
+class RenderClipsTask(PipelineTask):
+    stage = JobStage.RENDER_CLIPS
+    # Десять клипов по полторы минуты на медленном пресете — это десятки
+    # минут, а на двухчасовом исходнике к ним добавляется перемотка.
+    # Часового лимита мало.
+    time_limit = 4 * 3600
+    soft_time_limit = 4 * 3600 - 300
 
 
 class AnalyzeVisionTask(PipelineTask):
@@ -247,6 +257,35 @@ def score_scenes(self: ScoreScenesTask, job_id: str) -> dict[str, Any]:
         "scenes": result.scenes_scored,
         "mean_score": result.mean_score,
         "max_score": result.max_score,
+        "duration_sec": result.duration_sec,
+        "skipped": result.skipped,
+        "reused": result.reused,
+    }
+
+
+@celery_app.task(
+    base=RenderClipsTask,
+    bind=True,
+    name="workers.tasks.pipeline.render_clips",
+)
+def render_clips(self: RenderClipsTask, job_id: str) -> dict[str, Any]:
+    """Нарезка отобранных моментов в файлы.
+
+    Один из трёх этапов, которые валят джоб (док 04, §4.5) — но только
+    если не собрался **ни один** клип. Падение отдельного клипа помечает
+    его ``failed`` и на остальные не влияет: девять готовых файлов
+    полезнее, чем ноль из-за одного битого отрезка.
+    """
+    result = run_async(get_container().render_clips.execute(UUID(job_id)))
+    return {
+        "job_id": str(result.job_id),
+        "clips": result.clips_total,
+        "rendered": result.rendered,
+        "failed": result.failed,
+        "vertical": result.vertical,
+        "thumbnails": result.thumbnails,
+        "modes": dict(result.modes),
+        "warnings": list(result.warnings),
         "duration_sec": result.duration_sec,
         "skipped": result.skipped,
         "reused": result.reused,

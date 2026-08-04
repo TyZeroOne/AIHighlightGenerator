@@ -13,7 +13,7 @@ from types import TracebackType
 from typing import Protocol, Self
 from uuid import UUID
 
-from core.domain.entities import Clip, Job, Scene, UploadSession, User, Video
+from core.domain.entities import Asset, Clip, Job, Scene, UploadSession, User, Video
 from core.domain.enums import AssetKind, AssetOwnerType, JobStatus
 from core.domain.media import Transcript
 
@@ -32,18 +32,15 @@ __all__ = [
 ]
 
 
-class AssetRecord(Protocol):
-    """Минимум, который сценариям нужно знать об артефакте.
-
-    Не полная ORM-строка: сценарию не нужны ни `deleted_at`, ни связи.
-    Узкий протокол = меньше поводов утечь деталям хранения наверх.
-    """
-
-    id: UUID
-    kind: AssetKind
-    storage_key: str
-    mime: str
-    size_bytes: int
+#: Артефакт наружу отдаётся доменным объектом. Раньше здесь стоял
+#: отдельный протокол ``AssetRecord`` — «минимум, который нужно знать
+#: об артефакте», — и репозиторий возвращал под ним строку ORM.
+#: Это оказалось ошибкой дважды. Во-первых, строка живёт только внутри
+#: сессии и за её пределами падает `DetachedInstanceError`. Во-вторых,
+#: изменяемые атрибуты в ``Protocol`` инвариантны, и подставить под него
+#: неизменяемый объект нельзя — тот же самый урок, что и с репозиториями
+#: на Этапе 2. Домен уже описывает артефакт; второе описание не нужно.
+type AssetRecord = Asset
 
 
 class UserRepository(Protocol):
@@ -91,6 +88,14 @@ class AssetRepositoryPort(Protocol):
         checksum: str | None = None,
         ttl_hours: int | None = None,
     ) -> UUID: ...
+
+    async def get(self, asset_id: UUID) -> AssetRecord | None:
+        """Артефакт по идентификатору.
+
+        Нужен скачиванию: клиент приходит с ``asset_id`` из списка клипов,
+        а владельца (и, через него, право на скачивание) проверяет уже API.
+        """
+        ...
 
     async def list_for_owner(
         self, owner_type: AssetOwnerType, owner_id: UUID
