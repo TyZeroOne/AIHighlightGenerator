@@ -383,6 +383,43 @@ async def _render(*, job_id: UUID, enqueue: bool, show: int) -> int:
     return 0
 
 
+async def _metadata(*, job_id: UUID, show: int) -> int:
+    """Сгенерировать заголовки, описания и хештеги по клипам."""
+    container = get_container()
+    result = await container.generate_metadata.execute(job_id)
+
+    if result.skipped:
+        print("метаданные: пропущены (нет клипов или LLM_ENABLED=false)")
+        return 1
+    if result.reused:
+        print("метаданные: уже сгенерированы ранее")
+        return 0
+    if result.degraded:
+        print("метаданные: модель недоступна, клипы остались без заголовков", file=sys.stderr)
+        return 1
+
+    print(f"готово   : {result.annotated} из {result.clips_total}, ошибок {result.failed}")
+    print(f"время    : {result.duration_sec:.1f} с")
+    if result.cost:
+        print(f"расход   : {json.dumps(dict(result.cost), ensure_ascii=False)}")
+
+    if show:
+        async with container.uow() as uow:
+            clips = await uow.clips.list_for_job(job_id)
+        print("\nметаданные клипов:")
+        for clip in clips[:show]:
+            meta = clip.metadata
+            if meta is None:
+                print(f"  {clip.rank:2d}. —")
+                continue
+            print(f"  {clip.rank:2d}. {meta.title}")
+            print(f"      {meta.description}")
+            print(f"      {' '.join(meta.hashtags)}")
+            if meta.hook:
+                print(f"      хук: {meta.hook}")
+    return 0
+
+
 async def _analyze(*, job_id: UUID, groups: Sequence[str], show: int) -> int:
     """Посчитать признаки по уже разбитому на сцены джобу."""
     container = get_container()
@@ -484,6 +521,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     render.add_argument("--show", type=int, default=10, help="Сколько клипов напечатать")
 
+    meta = sub.add_parser("metadata", help="Заголовки, описания и хештеги по клипам")
+    meta.add_argument("--job-id", required=True, type=UUID)
+    meta.add_argument("--show", type=int, default=10, help="Сколько клипов напечатать")
+
     args = parser.parse_args(argv)
     configure_logging(level="WARNING", fmt="console")
 
@@ -518,6 +559,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.command == "render":
         return asyncio.run(_render(job_id=args.job_id, enqueue=args.enqueue, show=args.show))
+    if args.command == "metadata":
+        return asyncio.run(_metadata(job_id=args.job_id, show=args.show))
     return 1
 
 

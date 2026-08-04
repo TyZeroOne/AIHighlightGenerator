@@ -11,10 +11,11 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Query, Response, status
+from fastapi import APIRouter, Query, Request, Response, status
 from fastapi.responses import RedirectResponse, StreamingResponse
 
 from api.deps import ContainerDep, CurrentUser
+from api.ranges import parse_range
 from api.schemas.clips import ClipItemResponse, ClipListResponse
 from core.domain.enums import AssetOwnerType
 from core.domain.errors import NotFoundError, ValidationError
@@ -94,13 +95,15 @@ async def download_asset(
     container: ContainerDep,
     user: CurrentUser,
     asset_id: UUID,
+    request: Request,
     inline: Annotated[bool, Query(description="Открыть в браузере, а не скачать")] = False,
 ) -> Response:
     """Отдача артефакта — та же развилка, что и у исходного видео.
 
     S3 отдаёт presigned-ссылку, и байты идут мимо нашего процесса;
     локальное хранилище прямых ссылок не умеет, поэтому файл течёт
-    через API.
+    через API — с поддержкой ``Range``, иначе перемотка в плеере
+    превращается в полную загрузку.
     """
     async with container.uow() as uow:
         asset = await uow.assets.get(asset_id)
@@ -112,19 +115,43 @@ async def download_asset(
     if signed is not None:
         return RedirectResponse(signed, status_code=status.HTTP_302_FOUND)
 
+    # Размер в базе мог устареть (файл перезаписан повторным рендером),
+    # а от него зависят границы диапазона — спрашиваем хранилище.
+    total = await container.storage.size(key) or size
+
+    try:
+        span = parse_range(request.headers.get("range"), total)
+    except ValueError:
+        # Единственный случай, когда непонятный Range — это ошибка, а не
+        # повод отдать файл целиком: клиент просит заведомо несуществующие
+        # байты, и по RFC 9110 ему полагается 416 с фактическим размером.
+        return Response(
+            status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
+            headers={"Content-Range": f"bytes */{total}"},
+        )
+
     disposition = "inline" if inline else "attachment"
     filename = f"{asset_id}{_EXTENSIONS.get(mime, '')}"
+    headers = {
+        "Content-Disposition": f'{disposition}; filename="{filename}"',
+        "Accept-Ranges": "bytes",
+    }
+
+    if span is None:
+        headers["Content-Length"] = str(total)
+        return StreamingResponse(
+            container.storage.open_stream(key),
+            media_type=mime,
+            headers=headers,
+        )
+
+    headers["Content-Length"] = str(span.length)
+    headers["Content-Range"] = span.content_range(total)
     return StreamingResponse(
-        container.storage.open_stream(key),
+        container.storage.open_stream(key, offset=span.start, length=span.length),
         media_type=mime,
-        headers={
-            "Content-Disposition": f'{disposition}; filename="{filename}"',
-            "Content-Length": str(size or 0),
-            # Заголовок заявляет поддержку перемотки, но обработки Range
-            # здесь пока нет — как и у исходного видео. Полноценная
-            # частичная отдача относится к работам Этапа 10.
-            "Accept-Ranges": "bytes",
-        },
+        headers=headers,
+        status_code=status.HTTP_206_PARTIAL_CONTENT,
     )
 
 

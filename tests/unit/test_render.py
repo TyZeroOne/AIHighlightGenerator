@@ -35,10 +35,11 @@ from core.domain.enums import (
     JobStage,
     JobStatus,
     SourceKind,
+    SubtitleFormat,
     VideoStatus,
 )
 from core.domain.errors import ProcessingError, ValidationError
-from core.domain.media import LocalMedia, MediaInfo
+from core.domain.media import LocalMedia, MediaInfo, Transcript, TranscriptSegment, TranscriptWord
 from core.domain.render import VERTICAL_HEIGHT, VERTICAL_WIDTH, CropKeyframe, RenderSpec
 from core.domain.values import CropBox, TimeRange
 from core.usecases.render import RenderClips, RenderSettings, thumbnail_moment
@@ -421,14 +422,58 @@ class FakeVideoRepo:
         return self.video
 
 
+class FakeTranscriptRepo:
+    def __init__(self, transcript: Transcript | None = None) -> None:
+        self.transcript = transcript or Transcript()
+
+    async def get_for_job(self, job_id: UUID) -> Transcript:
+        return self.transcript
+
+
+class FakeSubtitleWriter:
+    """Порт ``SubtitleWriter`` без разбиения на реплики.
+
+    Проверять здесь надо не содержимое субтитров (для этого есть тесты
+    самих форматов), а то, что сценарий их пишет, кладёт в хранилище
+    и переживает их отсутствие.
+    """
+
+    def __init__(self, *, fails: bool = False) -> None:
+        self.fails = fails
+        self.calls: list[tuple[str, int | None, int | None]] = []
+
+    def write(
+        self,
+        transcript: Transcript,
+        span: TimeRange,
+        fmt: SubtitleFormat,
+        destination: Path,
+        *,
+        width: int | None = None,
+        height: int | None = None,
+    ) -> Path:
+        if self.fails:
+            raise ProcessingError("субтитры не собрались")
+        self.calls.append((fmt.value, width, height))
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text("текст", encoding="utf-8")
+        return destination
+
+
 class FakeUow:
     def __init__(
-        self, jobs: FakeJobRepo, videos: FakeVideoRepo, clips: FakeClipRepo, assets: FakeAssetRepo
+        self,
+        jobs: FakeJobRepo,
+        videos: FakeVideoRepo,
+        clips: FakeClipRepo,
+        assets: FakeAssetRepo,
+        transcripts: FakeTranscriptRepo | None = None,
     ) -> None:
         self.jobs = jobs
         self.videos = videos
         self.clips = clips
         self.assets = assets
+        self.transcripts = transcripts or FakeTranscriptRepo()
 
     async def __aenter__(self) -> FakeUow:
         return self
@@ -486,6 +531,7 @@ def build(scenario: dict[str, object], renderer: FakeRenderer, **kwargs: object)
         provider_resolver=lambda uri: scenario["provider"],  # type: ignore[arg-type,return-value]
         workdir=scenario["workdir"],  # type: ignore[arg-type]
         planner=kwargs.get("planner", FakePlanner()),  # type: ignore[arg-type]
+        subtitles=kwargs.get("subtitles"),  # type: ignore[arg-type]
         settings=kwargs.get("settings", RenderSettings(concurrency=2)),  # type: ignore[arg-type]
     )
 
@@ -587,6 +633,88 @@ class TestRenderStage:
         assert result.vertical == 0
         assert result.thumbnails == 0
         assert result.rendered == 3
+
+
+def speaking_transcript() -> Transcript:
+    words = []
+    moment = 60.0
+    for token in ["раз", "два", "три", "четыре", "пять", "шесть"]:
+        words.append(TranscriptWord(text=token, start=moment, end=moment + 0.4))
+        moment += 0.5
+    segment = TranscriptSegment(
+        text="раз два три четыре пять шесть",
+        range=TimeRange(60.0, moment),
+        words=tuple(words),
+    )
+    return Transcript(segments=(segment,), language="ru")
+
+
+class TestSubtitlesInRender:
+    @pytest.mark.asyncio
+    async def test_subtitle_files_are_written_and_stored(self, scenario: dict[str, object]) -> None:
+        uow: FakeUow = scenario["uow"]  # type: ignore[assignment]
+        uow.transcripts.transcript = speaking_transcript()
+        writer = FakeSubtitleWriter()
+
+        result = await build(scenario, FakeRenderer(), subtitles=writer).execute(
+            scenario["job_id"]  # type: ignore[arg-type]
+        )
+
+        assert result.subtitles == 6  # два формата на каждый из трёх клипов
+        storage: FakeStorage = scenario["storage"]  # type: ignore[assignment]
+        assert sum(1 for key in storage.objects if key.endswith(".srt")) == 3
+        assert sum(1 for key in storage.objects if key.endswith(".ass")) == 3
+
+    @pytest.mark.asyncio
+    async def test_video_without_speech_gets_no_subtitles(
+        self, scenario: dict[str, object]
+    ) -> None:
+        """Пустой транскрипт — не ошибка: у видео без речи субтитров нет."""
+        writer = FakeSubtitleWriter()
+
+        result = await build(scenario, FakeRenderer(), subtitles=writer).execute(
+            scenario["job_id"]  # type: ignore[arg-type]
+        )
+
+        assert result.subtitles == 0
+        assert result.rendered == 3
+        assert not writer.calls
+
+    @pytest.mark.asyncio
+    async def test_broken_subtitles_do_not_break_the_clip(
+        self, scenario: dict[str, object]
+    ) -> None:
+        uow: FakeUow = scenario["uow"]  # type: ignore[assignment]
+        uow.transcripts.transcript = speaking_transcript()
+
+        result = await build(
+            scenario, FakeRenderer(), subtitles=FakeSubtitleWriter(fails=True)
+        ).execute(scenario["job_id"])  # type: ignore[arg-type]
+
+        assert result.rendered == 3
+        assert result.subtitles == 0
+        assert len(result.warnings) == 6
+
+    @pytest.mark.asyncio
+    async def test_burning_asks_for_a_vertical_sized_file(
+        self, scenario: dict[str, object]
+    ) -> None:
+        """ASS собирается под каждый кадр отдельно: файл, сделанный для
+        горизонтали, в вертикали растянул бы текст поперёк."""
+        uow: FakeUow = scenario["uow"]  # type: ignore[assignment]
+        uow.transcripts.transcript = speaking_transcript()
+        writer = FakeSubtitleWriter()
+
+        await build(
+            scenario,
+            FakeRenderer(),
+            subtitles=writer,
+            settings=RenderSettings(burn=True, concurrency=1),
+        ).execute(scenario["job_id"])  # type: ignore[arg-type]
+
+        sizes = {(width, height) for fmt, width, height in writer.calls if fmt == "ass"}
+        assert (VERTICAL_WIDTH, VERTICAL_HEIGHT) in sizes
+        assert (1920, 1080) in sizes  # размер исходника из make_media
 
 
 class TestDetectorThreadSafety:

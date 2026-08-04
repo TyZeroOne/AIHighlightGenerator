@@ -29,6 +29,8 @@ __all__ = [
     "analyze_vision",
     "detect_scenes",
     "extract_audio",
+    "finalize",
+    "generate_metadata",
     "llm_rank",
     "render_clips",
     "score_scenes",
@@ -68,6 +70,18 @@ class LLMRankTask(PipelineTask):
     # Ретраи здесь не нужны: сценарий сам переживает недоступность модели
     # и переводит джоб на эвристику. Повтор задачи означал бы вторую оплату
     # тех же токенов ради того же результата.
+    max_retries = 0
+
+
+class FinalizeTask(PipelineTask):
+    stage = JobStage.FINALIZE
+
+
+class GenerateMetadataTask(PipelineTask):
+    stage = JobStage.GENERATE_METADATA
+    # Ретраи не нужны по той же причине, что у ранжирования: сценарий сам
+    # переживает недоступность модели, а повтор означал бы вторую оплату
+    # тех же токенов.
     max_retries = 0
 
 
@@ -284,11 +298,62 @@ def render_clips(self: RenderClipsTask, job_id: str) -> dict[str, Any]:
         "failed": result.failed,
         "vertical": result.vertical,
         "thumbnails": result.thumbnails,
+        "subtitles": result.subtitles,
+        "burned": result.burned,
         "modes": dict(result.modes),
         "warnings": list(result.warnings),
         "duration_sec": result.duration_sec,
         "skipped": result.skipped,
         "reused": result.reused,
+    }
+
+
+@celery_app.task(
+    base=FinalizeTask,
+    bind=True,
+    name="workers.tasks.pipeline.finalize",
+)
+def finalize(self: FinalizeTask, job_id: str) -> dict[str, Any]:
+    """Манифест и итоговый статус джоба.
+
+    Здесь джоб перестаёт быть «выполняющимся»: ``succeeded``, если всё
+    прошло, ``partial`` при деградации по пути, ``failed`` если ни одного
+    готового клипа не осталось.
+    """
+    result = run_async(get_container().finalize_job.execute(UUID(job_id)))
+    return {
+        "job_id": str(result.job_id),
+        "status": result.status.value,
+        "clips_ready": result.clips_ready,
+        "clips_failed": result.clips_failed,
+        "manifest_key": result.manifest_key,
+        "duration_sec": result.duration_sec,
+        "reused": result.reused,
+    }
+
+
+@celery_app.task(
+    base=GenerateMetadataTask,
+    bind=True,
+    name="workers.tasks.pipeline.generate_metadata",
+)
+def generate_metadata(self: GenerateMetadataTask, job_id: str) -> dict[str, Any]:
+    """Заголовки, описания и хештеги по клипам.
+
+    Недоступность модели не проваливает джоб: клипы остаются без
+    подписей, этап помечается пройденным с признаком деградации.
+    """
+    result = run_async(get_container().generate_metadata.execute(UUID(job_id)))
+    return {
+        "job_id": str(result.job_id),
+        "clips": result.clips_total,
+        "annotated": result.annotated,
+        "failed": result.failed,
+        "cost": dict(result.cost),
+        "duration_sec": result.duration_sec,
+        "skipped": result.skipped,
+        "reused": result.reused,
+        "degraded": result.degraded,
     }
 
 

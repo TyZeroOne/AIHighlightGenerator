@@ -42,6 +42,7 @@ from typing import Final
 
 from core.domain.render import VERTICAL_HEIGHT, VERTICAL_WIDTH, CropKeyframe, RenderSpec
 from core.logging import get_logger
+from video_editor.burn import append_burn, escape_filter_path
 from video_editor.encoder import video_args
 from video_editor.process import probe_json, run_ffmpeg
 
@@ -170,7 +171,7 @@ class FFmpegVerticalRenderer:
 
         first = track[0].box
         chain = (
-            f"sendcmd=f='{_escape(script)}',"
+            f"sendcmd=f='{escape_filter_path(script)}',"
             f"crop=w={first.width}:h={first.height}:x={first.x}:y={first.y},"
             f"scale={self._width}:{self._height}:flags=bicubic,setsar=1"
         )
@@ -276,8 +277,12 @@ def _video_only(spec: RenderSpec, *, filter_chain: str | None = None) -> list[st
 
     Размер здесь задают фильтры, а не поля ``width``/``height``: иначе
     ffmpeg получил бы два противоречивых указания на один и тот же кадр.
+
+    Вжигание субтитров добавляется в самый конец цепочки: текст рисуется
+    на том кадре, который увидит зритель, — после кропа и масштабирования.
     """
-    return video_args(replace(spec, width=None, height=None), filter_chain=filter_chain)
+    chain = append_burn(filter_chain or "", spec.burn_subtitles_path)
+    return video_args(replace(spec, width=None, height=None), filter_chain=chain or None)
 
 
 def _maps() -> list[str]:
@@ -305,19 +310,6 @@ def _audio_passthrough() -> list[str]:
 
 def _container(spec: RenderSpec) -> list[str]:
     return ["-movflags", "+faststart"] if spec.faststart else []
-
-
-def _escape(path: Path) -> str:
-    """Экранирование пути внутри аргумента фильтра.
-
-    В графе фильтров двоеточие разделяет параметры, запятая — фильтры,
-    и путь вида ``C:\\tmp\\a,b.cmd`` разваливает разбор. Обратный слеш
-    перед каждым таким символом — то, чего ждёт парсер ffmpeg.
-    """
-    text = str(path)
-    for symbol in ("\\", ":", ",", "'", "[", "]", ";"):
-        text = text.replace(symbol, "\\" + symbol)
-    return text
 
 
 async def _source_fps(probe_binary: str, source: Path) -> float:

@@ -33,7 +33,26 @@ x-app-env: &app-env
   S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
   S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
   LOCAL_SOURCE_ROOTS_RAW: ${LOCAL_SOURCE_ROOTS_RAW:-/media/in}
+  # Языковая модель (Этапы 6 и 9). Переменные перечислены поимённо,
+  # а не подтягиваются файлом: контейнер не монтирует `.env`, и всё,
+  # чего здесь нет, до приложения не доезжает. Отсутствие
+  # OPENROUTER_API_KEY в этом списке стоило падения этапа метаданных
+  # на первом же живом прогоне — при том что ключ в `.env` был.
+  LLM_PROVIDER: ${LLM_PROVIDER:-openrouter}
+  LLM_ENABLED: ${LLM_ENABLED:-true}
+  LLM_BATCH_SIZE: ${LLM_BATCH_SIZE:-40}
+  LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-16000}
+  OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+  OPENROUTER_MODEL: ${OPENROUTER_MODEL:-google/gemma-4-26b-a4b-it:free}
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  # Нарезка и субтитры (Этапы 8 и 9).
+  RENDER_CRF: ${RENDER_CRF:-20}
+  RENDER_PRESET: ${RENDER_PRESET:-medium}
+  RENDER_VERTICAL: ${RENDER_VERTICAL:-true}
+  RENDER_CONCURRENCY: ${RENDER_CONCURRENCY:-2}
+  SUBTITLE_FORMATS: ${SUBTITLE_FORMATS:-srt,ass}
+  SUBTITLE_KARAOKE: ${SUBTITLE_KARAOKE:-true}
+  BURN_SUBTITLES: ${BURN_SUBTITLES:-false}
   # Распознавание речи (Этап 4). Веса качаются в том models при первом
   # запуске: large-v3 — это 3 ГБ, поэтому том, а не слой образа.
   HF_HOME: /models

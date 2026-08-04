@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import UUID
 
+from core.domain.entities import ClipMetadata
 from core.domain.media import AudioTrack, LocalMedia, Transcript
 from core.domain.values import MediaWindow, TimeRange
 
@@ -15,6 +16,7 @@ __all__ = [
     "ARTIFACT_TRANSCRIPT",
     "ARTIFACT_VIDEO",
     "AnalysisContext",
+    "AnnotationOutcome",
     "LLMVerdict",
     "RankingOutcome",
     "SceneSummary",
@@ -142,3 +144,25 @@ class RankingOutcome:
     @property
     def all_failed(self) -> bool:
         return self.batches > 0 and len(self.failed) == self.batches
+
+
+@dataclass(frozen=True, slots=True)
+class AnnotationOutcome:
+    """Результат генерации метаданных по клипам джоба.
+
+    Тот же приём, что и с ``RankingOutcome``: сценарий этапа разговаривает
+    с любым аннотатором через один тип и не знает ни про промпты,
+    ни про то, одним запросом это сделано или десятью.
+    """
+
+    #: Метаданные по идентификатору клипа. Словарь, а не список: клипы,
+    #: по которым модель не ответила, просто отсутствуют — и это видно
+    #: без сравнения длин.
+    metadata: Mapping[UUID, ClipMetadata] = field(default_factory=dict)
+    requested: int = 0
+    failed: Sequence[str] = field(default_factory=tuple)
+    cost: Mapping[str, object] = field(default_factory=dict)
+
+    @property
+    def all_failed(self) -> bool:
+        return self.requested > 0 and not self.metadata

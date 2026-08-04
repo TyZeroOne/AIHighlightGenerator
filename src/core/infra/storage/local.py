@@ -83,7 +83,13 @@ class LocalStorage:
         path = self._path(key)
         return path if path.exists() else None
 
-    async def _stream(self, key: str, chunk_size: int) -> AsyncIterator[bytes]:
+    async def _stream(
+        self,
+        key: str,
+        chunk_size: int,
+        offset: int,
+        length: int | None,
+    ) -> AsyncIterator[bytes]:
         path = self._path(key)
         if not path.exists():
             raise ObjectNotFoundError(f"Объект не найден: {key}", key=key)
@@ -91,13 +97,33 @@ class LocalStorage:
         # а отдача 2 ГБ заблокировала бы его надолго.
         handle = await asyncio.to_thread(path.open, "rb")
         try:
-            while chunk := await asyncio.to_thread(handle.read, chunk_size):
+            if offset:
+                await asyncio.to_thread(handle.seek, offset)
+            # ``remaining is None`` означает «до конца файла»; иначе считаем
+            # оставшиеся байты и читаем ровно столько, сколько просили.
+            remaining = length
+            while True:
+                want = chunk_size if remaining is None else min(chunk_size, remaining)
+                if want <= 0:
+                    break
+                chunk = await asyncio.to_thread(handle.read, want)
+                if not chunk:
+                    break
+                if remaining is not None:
+                    remaining -= len(chunk)
                 yield chunk
         finally:
             await asyncio.to_thread(handle.close)
 
-    def open_stream(self, key: str, *, chunk_size: int = 1 << 20) -> AsyncIterator[bytes]:
-        return self._stream(key, chunk_size)
+    def open_stream(
+        self,
+        key: str,
+        *,
+        chunk_size: int = 1 << 20,
+        offset: int = 0,
+        length: int | None = None,
+    ) -> AsyncIterator[bytes]:
+        return self._stream(key, chunk_size, offset, length)
 
     # ------------------------------------------------------- метаданные
     async def exists(self, key: str) -> bool:

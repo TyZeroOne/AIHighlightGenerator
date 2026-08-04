@@ -57,6 +57,7 @@ from core.domain.media import LocalMedia
 from core.domain.render import RenderSpec
 from core.domain.values import TimeRange
 from core.logging import get_logger
+from video_editor.burn import append_burn
 from video_editor.encoder import audio_args, video_args
 from video_editor.process import keyframe_times, probe_duration, run_ffmpeg
 
@@ -232,7 +233,9 @@ def _encode_args(
 ) -> list[str]:
     args = _seek_args(media, window)
     args += _map_args(media)
-    args += video_args(spec)
+    # Вжигание — последним фильтром: до масштабирования текст растянулся бы
+    # вместе с картинкой.
+    args += video_args(spec, filter_chain=append_burn("", spec.burn_subtitles_path) or None)
     if media.info.has_audio:
         args += audio_args(spec)
     if spec.faststart:

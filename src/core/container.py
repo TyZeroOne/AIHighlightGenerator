@@ -25,13 +25,15 @@ from core.domain.render import RenderSpec
 from core.infra.db.session import create_engine, create_session_factory
 from core.infra.db.uow import SqlAlchemyUnitOfWork
 from core.logging import configure_logging, get_logger
-from core.ports.llm import LLMProvider, SceneRanker
+from core.ports.export import ManifestBuilder
+from core.ports.llm import ClipAnnotator, LLMProvider, SceneRanker
 from core.ports.media import (
     AudioExtractor,
     ClipRenderer,
     CropPlanner,
     KeyframeExtractor,
     SceneDetector,
+    SubtitleWriter,
 )
 from core.ports.repository import UnitOfWork
 from core.ports.source import MediaProbe, SourceProvider
@@ -45,6 +47,8 @@ from core.usecases.chunked_upload import (
     UploadPart,
 )
 from core.usecases.detect_scenes import DetectScenes, SceneDetectionSettings
+from core.usecases.finalize import FinalizeJob
+from core.usecases.metadata import GenerateMetadata
 from core.usecases.rank import RankScenes
 from core.usecases.render import RenderClips, RenderSettings
 from core.usecases.score import ScoreScenes
@@ -488,6 +492,27 @@ class Container:
         return FaceCropPlanner()
 
     @cached_property
+    def subtitle_writer(self) -> SubtitleWriter:
+        """Субтитры клипа. Настройки разбиения и оформления — из конфига."""
+        from subtitles.ass import AssStyle
+        from subtitles.cues import CueSettings
+        from subtitles.writer import ClipSubtitleWriter
+
+        settings = self.settings
+        return ClipSubtitleWriter(
+            settings=CueSettings(
+                max_chars=settings.subtitle_max_chars,
+                max_lines=settings.subtitle_max_lines,
+                reading_speed=settings.subtitle_reading_speed,
+                min_duration_sec=settings.subtitle_min_duration_sec,
+                max_duration_sec=settings.subtitle_max_duration_sec,
+                gap_sec=settings.subtitle_gap_sec,
+            ),
+            style=AssStyle(font=settings.subtitle_font, size=settings.subtitle_font_size),
+            karaoke=settings.subtitle_karaoke,
+        )
+
+    @cached_property
     def render_clips(self) -> RenderClips:
         settings = self.settings
         return RenderClips(
@@ -497,11 +522,14 @@ class Container:
             provider_resolver=self.resolve_provider,
             workdir=self.workdir,
             planner=self.crop_planner if settings.render_vertical else None,
+            subtitles=self.subtitle_writer if settings.subtitle_formats_list else None,
             settings=RenderSettings(
                 spec=self.render_spec,
                 vertical=settings.render_vertical,
                 thumbnails=settings.render_thumbnails,
                 concurrency=settings.render_concurrency,
+                subtitle_formats=settings.subtitle_formats_list,
+                burn=settings.burn_subtitles,
             ),
         )
 
@@ -550,6 +578,36 @@ class Container:
         return BatchRanker(
             provider=self.llm,
             batch_size=self.settings.llm_batch_size,
+        )
+
+    def clip_annotator(self) -> ClipAnnotator:
+        """Аннотатор клипов. Метод по той же причине, что и ранжировщик:
+        расход копится в провайдере, и каждому джобу нужен свой."""
+        from llm.annotator import ClipMetadataAnnotator
+
+        return ClipMetadataAnnotator(provider=self.llm)
+
+    @cached_property
+    def generate_metadata(self) -> GenerateMetadata:
+        return GenerateMetadata(
+            uow_factory=self.uow,
+            annotator_factory=self.clip_annotator,
+            enabled=self.settings.llm_enabled,
+        )
+
+    @cached_property
+    def manifest_builder(self) -> ManifestBuilder:
+        from export.manifest import JsonManifestBuilder
+
+        return JsonManifestBuilder()
+
+    @cached_property
+    def finalize_job(self) -> FinalizeJob:
+        return FinalizeJob(
+            uow_factory=self.uow,
+            storage=self.storage,
+            manifest=self.manifest_builder,
+            workdir=self.workdir,
         )
 
     @cached_property

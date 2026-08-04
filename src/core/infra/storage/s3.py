@@ -158,11 +158,28 @@ class S3Storage:
             raise self._wrap(error, key) from error
         return destination
 
-    async def _stream(self, key: str, chunk_size: int) -> AsyncIterator[bytes]:
+    async def _stream(
+        self,
+        key: str,
+        chunk_size: int,
+        offset: int,
+        length: int | None,
+    ) -> AsyncIterator[bytes]:
+        # Диапазон отдаёт сам S3 — заголовком запроса, а не нашей
+        # перемоткой по потоку: скачивать начало файла, чтобы выбросить
+        # его и отдать середину, значит платить за трафик дважды.
+        byte_range = ""
+        if offset or length is not None:
+            end = "" if length is None else str(offset + length - 1)
+            byte_range = f"bytes={offset}-{end}"
+
+        def _get() -> Any:
+            # Пустой ``Range`` boto3 понимает как «весь объект», поэтому
+            # отдельной ветки на случай «диапазона нет» не нужно.
+            return self._client.get_object(Bucket=self._bucket, Key=key, Range=byte_range)
+
         try:
-            response = await asyncio.to_thread(
-                self._client.get_object, Bucket=self._bucket, Key=key
-            )
+            response = await asyncio.to_thread(_get)
         except Exception as error:
             raise self._wrap(error, key) from error
 
@@ -173,8 +190,15 @@ class S3Storage:
         finally:
             await asyncio.to_thread(body.close)
 
-    def open_stream(self, key: str, *, chunk_size: int = 1 << 20) -> AsyncIterator[bytes]:
-        return self._stream(key, chunk_size)
+    def open_stream(
+        self,
+        key: str,
+        *,
+        chunk_size: int = 1 << 20,
+        offset: int = 0,
+        length: int | None = None,
+    ) -> AsyncIterator[bytes]:
+        return self._stream(key, chunk_size, offset, length)
 
     # ------------------------------------------------------- метаданные
     async def exists(self, key: str) -> bool:

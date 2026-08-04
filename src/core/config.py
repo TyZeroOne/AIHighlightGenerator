@@ -231,6 +231,33 @@ class Settings(BaseSettings):
     #: и в требуемые ±0.05 с не укладывается (см. разбор Этапа 8).
     render_allow_stream_copy: bool = False
 
+    # --- субтитры (Этап 9) ---
+    #: Какие форматы писать рядом с клипом. SRT понимают все площадки,
+    #: ASS нужен для караоке-подсветки и вжигания.
+    subtitle_formats: str = "srt,ass"
+    #: Стандарт вещания. Строка длиннее заставляет глаз уходить от центра
+    #: кадра, и зритель перестаёт видеть картинку.
+    subtitle_max_chars: int = 42
+    subtitle_max_lines: int = 2
+    #: Скорость чтения, символов в секунду — из неё считается минимальное
+    #: время показа реплики.
+    subtitle_reading_speed: float = 17.0
+    subtitle_min_duration_sec: float = 1.0
+    subtitle_max_duration_sec: float = 6.0
+    #: Пауза в речи, после которой начинается новая реплика.
+    subtitle_gap_sec: float = 0.7
+    #: Караоке-подсветка по пословным таймингам в ASS.
+    subtitle_karaoke: bool = True
+    #: Шрифт вжигания. DejaVu есть в образе и покрывает кириллицу;
+    #: подставлять сюда шрифт, которого нет в контейнере, — верный способ
+    #: получить клип с квадратами вместо букв.
+    subtitle_font: str = "DejaVu Sans"
+    #: Кегль при высоте кадра 1080. Для других высот пересчитывается.
+    subtitle_font_size: int = 42
+    #: Вжигать субтитры в картинку. Выключено: вжжённый текст не убрать,
+    #: а отдельный файл субтитров площадки принимают сами.
+    burn_subtitles: bool = False
+
     #: Как часто пересчитывается положение вертикального кропа, кадров/с.
     #: Лица не телепортируются: четырёх измерений в секунду хватает,
     #: а разбор каждого кадра стоил бы дороже самого кодирования.
@@ -349,6 +376,12 @@ class Settings(BaseSettings):
     @property
     def allowed_containers_set(self) -> frozenset[str]:
         return frozenset(x.strip().lower() for x in self.allowed_containers.split(",") if x.strip())
+
+    @property
+    def subtitle_formats_list(self) -> tuple[str, ...]:
+        return tuple(
+            item.strip().lower() for item in self.subtitle_formats.split(",") if item.strip()
+        )
 
     @property
     def disabled_analyzers_set(self) -> frozenset[str]:

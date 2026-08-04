@@ -11,11 +11,17 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Protocol
 
-from core.domain.analysis import LLMVerdict, RankingOutcome, SceneSummary, VideoContext
-from core.domain.entities import ClipMetadata, Highlight, Scene
+from core.domain.analysis import (
+    AnnotationOutcome,
+    LLMVerdict,
+    RankingOutcome,
+    SceneSummary,
+    VideoContext,
+)
+from core.domain.entities import Clip, ClipMetadata, Highlight, Scene
 from core.domain.media import Transcript
 
-__all__ = ["LLMProvider", "SceneRanker"]
+__all__ = ["ClipAnnotator", "LLMProvider", "SceneRanker"]
 
 
 class LLMProvider(Protocol):
@@ -64,4 +70,29 @@ class SceneRanker(Protocol):
         context: VideoContext,
     ) -> RankingOutcome:
         """Оценить сцены. Недоступность сервиса — исключение, а не пустой список."""
+        ...
+
+
+class ClipAnnotator(Protocol):
+    """Метаданные по всем клипам джоба.
+
+    Отдельный порт над :class:`LLMProvider` — по той же границе, что
+    и :class:`SceneRanker`. Провайдер знает, как разговаривать с одной
+    моделью про один клип; аннотатор знает, сколько таких разговоров
+    вести одновременно, что делать с отказами и как посчитать расход.
+    """
+
+    async def annotate(
+        self,
+        clips: Sequence[Clip],
+        transcript: Transcript,
+        language: str | None = None,
+    ) -> AnnotationOutcome:
+        """Заголовки, описания и хештеги по клипам.
+
+        Контракт тот же, что у ранжирования: клип, по которому модель
+        не ответила, просто отсутствует в результате. Пустой результат —
+        допустимый ответ; недоступность сервиса выражается через
+        ``ExternalServiceError``.
+        """
         ...

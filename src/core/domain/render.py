@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
@@ -98,6 +98,10 @@ class RenderedClip:
     #: Пишется в метаданные ассета: без этого «почему тут кадр не двигался»
     #: пришлось бы выяснять пересмотром файла.
     reframe_mode: str | None = None
+    #: Файлы субтитров по форматам: ``{"srt": ..., "ass": ...}``.
+    #: Словарём, а не списком: дальше по конвейеру их спрашивают
+    #: по формату, а не перебирают.
+    subtitles: Mapping[str, Path] = field(default_factory=dict)
     error: str | None = None
     warnings: Sequence[str] = field(default_factory=tuple)
 

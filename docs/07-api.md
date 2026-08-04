@@ -199,8 +199,10 @@ FastAPI, OpenAPI 3.1 автоматически на `/docs` и `/openapi.json`.
 
 Скачивание артефакта.
 
-- При локальном storage — `StreamingResponse` с поддержкой `Range` (перемотка в плеере)
-  и `Content-Disposition: attachment`.
+- При локальном storage — `StreamingResponse` с поддержкой `Range`: `206`
+  с `Content-Range` на частичный запрос, `416` на диапазон за концом файла.
+  Поддержаны формы `bytes=START-END`, `bytes=START-`, `bytes=-N`;
+  множественные диапазоны — нет (реализовано на Этапе 9).
 - При S3/MinIO — `302` на presigned-URL с TTL 15 минут (байты не идут через API).
 - `?inline=true` — `Content-Disposition: inline` для воспроизведения в браузере.
 

@@ -19,6 +19,12 @@ from core.domain.errors import (
 pytestmark = pytest.mark.unit
 
 
+def _forget_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Убрать ключи провайдеров из окружения процесса."""
+    for name in ("OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+
+
 class TestSettings:
     def test_defaults_are_usable_in_dev(self) -> None:
         settings = Settings(_env_file=None)  # type: ignore[call-arg]
@@ -39,13 +45,23 @@ class TestSettings:
         with pytest.raises(ValueError, match="SECRET_KEY"):
             Settings(_env_file=None, app_env="prod")  # type: ignore[call-arg]
 
-    def test_prod_requires_llm_key_when_llm_enabled(self) -> None:
+    def test_prod_requires_llm_key_when_llm_enabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Какой именно ключ обязателен, зависит от провайдера — с Этапа 6
-        их два, и сообщение должно называть тот, что выбран."""
+        их два, и сообщение должно называть тот, что выбран.
+
+        Ключи убираются из окружения явно: ``_env_file=None`` отключает
+        только файл, а настоящие переменные среды pydantic читает всё
+        равно. В контейнере, где ключ проброшен через compose, тест без
+        этого проходил бы «успешно», ничего не проверив.
+        """
+        _forget_keys(monkeypatch)
         with pytest.raises(ValueError, match="openrouter"):
             Settings(_env_file=None, app_env="prod", secret_key="s3cret", llm_enabled=True)  # type: ignore[call-arg]
 
-    def test_prod_with_claude_provider_names_its_own_key(self) -> None:
+    def test_prod_with_claude_provider_names_its_own_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _forget_keys(monkeypatch)
         with pytest.raises(ValueError, match="claude"):
             Settings(  # type: ignore[call-arg]
                 _env_file=None,

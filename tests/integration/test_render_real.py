@@ -294,6 +294,96 @@ class TestVerticalOutput:
         assert types == {"video", "audio"}
 
 
+class TestBurnedSubtitles:
+    """DoD Этапа 9: вжигание работает и не ломает A/V-синхронизацию."""
+
+    @pytest.fixture
+    def subtitles(self, tmp_path_factory: pytest.TempPathFactory) -> Path:
+        """ASS под кадр исходника — с текстом на всём протяжении клипа."""
+        from core.domain.enums import SubtitleFormat
+        from core.domain.media import Transcript, TranscriptSegment, TranscriptWord
+        from subtitles.writer import ClipSubtitleWriter
+
+        words: list[TranscriptWord] = []
+        moment = 2.0
+        for token in ["первое", "слово", "второе", "слово", "третье", "слово"]:
+            words.append(TranscriptWord(text=token, start=moment, end=moment + 0.6))
+            moment += 0.7
+        transcript = Transcript(
+            segments=(
+                TranscriptSegment(text="текст", range=TimeRange(2.0, moment), words=tuple(words)),
+            ),
+            language="ru",
+        )
+        target = tmp_path_factory.mktemp("subs") / "clip.ass"
+        return ClipSubtitleWriter().write(
+            transcript, TimeRange(2.0, 8.0), SubtitleFormat.ASS, target, width=640, height=360
+        )
+
+    async def test_text_appears_in_the_picture(
+        self, source: LocalMedia, subtitles: Path, tmp_path: Path
+    ) -> None:
+        """Проверяется результат, а не факт запуска ffmpeg: кадр с текстом
+        обязан отличаться от того же кадра без него."""
+        cutter = FFmpegClipCutter(binary=str(FFMPEG), probe_binary=str(FFPROBE))
+        span = TimeRange(2.0, 8.0)
+        plain = await cutter.cut(source, span, RenderSpec(preset="ultrafast"), tmp_path / "p.mp4")
+        burned = await cutter.cut(
+            source,
+            span,
+            RenderSpec(preset="ultrafast", burn_subtitles_path=subtitles),
+            tmp_path / "b.mp4",
+        )
+
+        frames = [
+            _first_frame(path, 1.0, tmp_path / f"{path.stem}.png") for path in (plain, burned)
+        ]
+        assert frames[0] != frames[1], "кадр не изменился — субтитры не вжглись"
+
+    async def test_burning_keeps_duration_and_sync(
+        self, source: LocalMedia, subtitles: Path, tmp_path: Path
+    ) -> None:
+        cutter = FFmpegClipCutter(binary=str(FFMPEG), probe_binary=str(FFPROBE))
+        span = TimeRange(2.0, 8.0)
+        result = await cutter.cut_detailed(
+            source,
+            span,
+            RenderSpec(preset="ultrafast", burn_subtitles_path=subtitles),
+            tmp_path / "b.mp4",
+        )
+
+        assert result.duration_sec is not None
+        assert abs(result.duration_sec - span.duration) <= DURATION_TOLERANCE
+
+        payload = _probe(result.path, "stream=codec_type,start_time")
+        starts = {
+            stream["codec_type"]: float(stream.get("start_time", 0.0))
+            for stream in payload["streams"]  # type: ignore[index]
+        }
+        assert abs(starts["video"] - starts["audio"]) <= 0.05
+
+
+def _first_frame(video: Path, moment: float, target: Path) -> bytes:
+    subprocess.run(
+        [
+            str(FFMPEG),
+            "-y",
+            "-v",
+            "error",
+            "-ss",
+            f"{moment}",
+            "-i",
+            str(video),
+            "-frames:v",
+            "1",
+            str(target),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return target.read_bytes()
+
+
 class TestThumbnail:
     async def test_thumbnail_is_a_jpeg_of_requested_width(
         self, source: LocalMedia, tmp_path: Path
