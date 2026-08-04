@@ -80,6 +80,15 @@ celery_app.conf.task_routes = {
     "workers.tasks.pipeline.transcribe*": {"queue": "gpu"},
     "workers.tasks.pipeline.analyze_vision*": {"queue": "gpu"},
     "workers.tasks.pipeline.analyze_speech*": {"queue": "gpu"},
+    # Аудиогруппа поехала в очередь GPU на Этапе 5, когда в ней появился
+    # AudioSet-классификатор: он в ней самый дорогой, и на процессоре
+    # занимает больше времени, чем видеогруппа целиком. Громкость и паузы
+    # рядом с ним — арифметика, ради которой держать отдельный маршрут
+    # незачем.
+    #
+    # На конфигурации по умолчанию не меняется ничего: CPU-воркер слушает
+    # и очередь `gpu` тоже.
+    "workers.tasks.pipeline.analyze_audio*": {"queue": "gpu"},
     "workers.tasks.pipeline.llm_*": {"queue": "net"},
     # Всё остальное — на CPU. Сюда попадает detect_scenes: это чистая
     # арифметика по кадрам, ни сети, ни GPU она не ждёт.

@@ -37,8 +37,18 @@ worker = [
     "opencv-python-headless>=4.10",
     # Распознавание речи (Этап 4). faster-whisper — это CTranslate2, а не
     # PyTorch: вчетверо меньше памяти и вдвое быстрее оригинального openai-whisper
-    # при том же качестве. PyTorch появится на Этапе 5 ради SER и детекции лиц.
+    # при том же качестве.
     "faster-whisper>=1.1",
+    # Звуковые события и эмоции в голосе (Этап 5). Здесь PyTorch уже
+    # неизбежен: и AudioSet-классификатор, и SER — это torch-модели,
+    # аналога уровня CTranslate2 для них нет.
+    #
+    # Версия torch НЕ закреплена намеренно: CPU- и GPU-образы ставят разные
+    # сборки одного и того же релиза (см. docker/worker*.Dockerfile),
+    # и пин здесь означал бы пин обеих сразу.
+    "torch>=2.5",
+    "torchvision>=0.20",
+    "transformers>=4.46",
 ]
 dev = [
     "pytest>=8.3",
@@ -55,6 +65,11 @@ dev = [
     "scenedetect>=0.6.4",
     "opencv-python-headless>=4.10",
     "faster-whisper>=1.1",
+    # torch/transformers здесь НЕТ намеренно: юнит-тесты анализаторов
+    # на них не опираются (модель за портом, в тестах — фейк), а два
+    # гигабайта в окружении разработчика ради шести интеграционных тестов
+    # — плохая сделка. Тесты, которым нужны настоящие веса, помечены
+    # `integration` и пропускаются, если библиотеки нет.
 ]
 
 [build-system]
@@ -115,7 +130,22 @@ explicit_package_bases = true
 namespace_packages = true
 
 [[tool.mypy.overrides]]
-module = ["celery.*", "kombu.*", "scenedetect.*", "cv2.*", "faster_whisper.*", "ctranslate2.*"]
+module = [
+    "celery.*",
+    "kombu.*",
+    "scenedetect.*",
+    "cv2.*",
+    "faster_whisper.*",
+    "ctranslate2.*",
+    # ML-стек Этапа 5. Его нет в окружении разработчика намеренно (см. extra
+    # `dev`), поэтому mypy не найдёт даже стабы — а падать из-за этого
+    # проверка типов не должна: весь код с этими библиотеками общается
+    # через `Any` и локальные импорты внутри функций.
+    "torch.*",
+    "torchvision.*",
+    "transformers.*",
+    "huggingface_hub.*",
+]
 ignore_missing_imports = true
 
 # Celery не поставляет типы: его декораторы и базовый Task для mypy — Any.

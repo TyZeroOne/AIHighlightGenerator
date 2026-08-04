@@ -18,6 +18,8 @@ from uuid import UUID
 
 from core import registry
 from core.config import Settings, get_settings
+from core.domain.analysis import ARTIFACT_AUDIO, ARTIFACT_TRANSCRIPT, ARTIFACT_VIDEO
+from core.domain.enums import JobStage
 from core.domain.errors import DependencyResolutionError
 from core.infra.db.session import create_engine, create_session_factory
 from core.infra.db.uow import SqlAlchemyUnitOfWork
@@ -27,6 +29,7 @@ from core.ports.repository import UnitOfWork
 from core.ports.source import MediaProbe, SourceProvider
 from core.ports.speech import Transcriber
 from core.ports.storage import ObjectStorage
+from core.usecases.analyze import AnalyzeFeatures
 from core.usecases.chunked_upload import (
     ChunkedUploadLimits,
     CompleteChunkedUpload,
@@ -351,6 +354,52 @@ class Container:
             language=self.settings.whisper_language or None,
             sample_rate=self.settings.audio_sample_rate,
             channels=self.settings.audio_channels,
+        )
+
+    # ------------------------------------------------------- анализ признаков
+    def _analyzer_stage(
+        self,
+        *,
+        stage: JobStage,
+        group: str,
+        needs: frozenset[str],
+    ) -> AnalyzeFeatures:
+        """Один класс на три этапа: отличаются они только группой и сырьём."""
+        return AnalyzeFeatures(
+            uow_factory=self.uow,
+            storage=self.storage,
+            provider_resolver=self.resolve_provider,
+            workdir=self.workdir,
+            stage=stage,
+            group=group,
+            needs=needs,
+            disabled=self.settings.disabled_analyzers_set,
+            sample_rate=self.settings.audio_sample_rate,
+            channels=self.settings.audio_channels,
+        )
+
+    @cached_property
+    def analyze_audio(self) -> AnalyzeFeatures:
+        return self._analyzer_stage(
+            stage=JobStage.ANALYZE_AUDIO,
+            group="audio",
+            needs=frozenset({ARTIFACT_AUDIO}),
+        )
+
+    @cached_property
+    def analyze_speech(self) -> AnalyzeFeatures:
+        return self._analyzer_stage(
+            stage=JobStage.ANALYZE_SPEECH,
+            group="speech",
+            needs=frozenset({ARTIFACT_AUDIO, ARTIFACT_TRANSCRIPT}),
+        )
+
+    @cached_property
+    def analyze_vision(self) -> AnalyzeFeatures:
+        return self._analyzer_stage(
+            stage=JobStage.ANALYZE_VISION,
+            group="vision",
+            needs=frozenset({ARTIFACT_VIDEO}),
         )
 
     # ------------------------------------------------------- Этап 6+

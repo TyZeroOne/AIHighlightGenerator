@@ -37,7 +37,16 @@ x-app-env: &app-env
   # Распознавание речи (Этап 4). Веса качаются в том models при первом
   # запуске: large-v3 — это 3 ГБ, поэтому том, а не слой образа.
   HF_HOME: /models
+  # То же самое для весов torchvision (детектор людей, Этап 5): по умолчанию
+  # они легли бы в домашний каталог пользователя контейнера и качались
+  # заново после каждого пересоздания.
+  TORCH_HOME: /models
   DEVICE: ${DEVICE:-auto}
+  # Анализаторы признаков (Этап 5). Модели качаются в тот же том models.
+  AUDIO_EVENT_MODEL: ${AUDIO_EVENT_MODEL:-MIT/ast-finetuned-audioset-10-10-0.4593}
+  SER_MODEL: ${SER_MODEL:-superb/wav2vec2-base-superb-er}
+  FACE_DETECTOR: ${FACE_DETECTOR:-yunet}
+  ANALYZERS_DISABLED: ${ANALYZERS_DISABLED:-}
   # medium, а не large-v3: развёртывание по умолчанию — CPU-only, а там
   # large-v3 обрабатывает час речи 30 минут против 17 при том же WER
   # на разговорной речи. С видеокартой ставьте large-v3 явно.

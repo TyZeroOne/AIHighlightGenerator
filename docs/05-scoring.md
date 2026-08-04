@@ -16,7 +16,7 @@
 | `audio.pause.total` | `audio.pauses` | Суммарная длительность тишины (VAD) |
 | `audio.pause.max` | `audio.pauses` | Самая длинная пауза — маркер «драматической паузы» |
 | `audio.pause.ratio` | `audio.pauses` | Доля тишины в сцене |
-| `audio.event.laughter` | `audio.events` | Вероятность смеха (PANNs/AudioSet-классификатор) |
+| `audio.event.laughter` | `audio.events` | Вероятность смеха (AudioSet-классификатор, AST) |
 | `audio.event.scream` | `audio.events` | Вероятность крика |
 | `audio.event.applause` | `audio.events` | Аплодисменты |
 | `audio.event.music` | `audio.events` | Музыка — маркер монтажной вставки / титров |
@@ -30,11 +30,18 @@
 | `speech.rate.delta` | `speech.rate` | Отклонение темпа от базового для этого видео |
 | `speech.density` | `speech.rate` | Доля сцены, занятая речью |
 | `speech.dialogue_turns` | `speech.rate` | Оценка числа смен реплик (по паузам + смене темпа) |
-| `speech.emotion.arousal` | `speech.emotion` | Возбуждение, 0..1 (wav2vec2-SER) |
-| `speech.emotion.valence` | `speech.emotion` | Позитив/негатив, −1..1 |
-| `speech.emotion.dominant` | `speech.emotion` | Метка: neutral/happy/sad/angry/fear/surprise |
-| `speech.text.sentiment` | `speech.emotion` | Тональность текста (лексикон + модель) |
+| `speech.emotion.arousal` | `speech.emotion` | Возбуждение, 0..1 (проекция классов SER) |
+| `speech.emotion.valence` | `speech.emotion` | Позитив/негатив, −1..1 (проекция классов SER) |
+| `speech.emotion.neu` / `.hap` / `.ang` / `.sad` | `speech.emotion` | Вероятности классов wav2vec2-SER; argmax — та самая метка |
+| `speech.text.sentiment` | `speech.emotion` | Тональность текста (лексикон) |
 | `speech.text.exclamations` | `speech.emotion` | Плотность `!`, `?`, капса |
+
+> **Почему вместо `speech.emotion.dominant` четыре вероятности.** Признак
+> в базе — число, а не строка (`{"value": float, "confidence": float}`),
+> и ради одной метки менять домен, схему и скоринг не стоит. Вероятности
+> классов несут больше информации: «0.51 злости против 0.49 радости»
+> и «0.98 злости» — разные сцены, а метка у них одна. Подробности —
+> в разборе Этапа 5.
 
 ### Видео (`vision/`)
 
@@ -47,11 +54,11 @@
 | `vision.camera.pan` | `vision.motion` | Глобальное панорамирование (аффинная оценка по ORB) |
 | `vision.camera.zoom` | `vision.motion` | Наезд/отъезд |
 | `vision.camera.shake` | `vision.motion` | Дрожание — ручная камера, погоня |
-| `vision.faces.count_max` | `vision.faces` | Максимум лиц в кадре |
+| `vision.faces.count_max` | `vision.faces` | Максимум лиц в кадре (YuNet из OpenCV) |
 | `vision.faces.count_mean` | `vision.faces` | Среднее число лиц |
 | `vision.faces.area_ratio` | `vision.faces` | Доля кадра, занятая крупнейшим лицом (крупный план = эмоция) |
 | `vision.faces.closeup` | `vision.faces` | Флаг крупного плана |
-| `vision.people.count` | `vision.faces` | Число людей (детектор персон, шире чем лица) |
+| `vision.people.count` | `vision.faces` | Число людей (SSDLite/COCO — шире, чем лица: человек со спины тоже считается) |
 | `vision.dynamics.hist_delta` | `vision.dynamics` | Изменение цветовой гистограммы кадр-к-кадру |
 | `vision.dynamics.entropy` | `vision.dynamics` | Энтропия кадра — визуальная насыщенность |
 | `vision.dynamics.brightness_delta` | `vision.dynamics` | Резкие изменения яркости (вспышки, взрывы) |

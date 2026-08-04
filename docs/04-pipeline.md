@@ -67,16 +67,20 @@ def build_analysis_flow(job_id: UUID) -> Signature:
 | Очередь | Что выполняет | Конкурентность | Ресурс |
 |---|---|---|---|
 | `io` | ingest, скачивание, загрузка в storage, finalize | 8 | сеть/диск |
-| `cpu` | ffmpeg, детекция сцен, аудиопризнаки, скоринг, нарезка | `nproc` | CPU |
-| `gpu` | whisper, SER, детекция лиц, аудиособытия | 1–2 | VRAM |
+| `cpu` | ffmpeg, детекция сцен, извлечение аудио, скоринг, нарезка | `nproc` | CPU |
+| `gpu` | whisper, все три группы признаков (SER, лица, аудиособытия) | 1–2 | VRAM |
 | `net` | LLM-вызовы | 4 | внешний API, rate-limit |
 
 ```python
 task_routes = {
-    "workers.tasks.ingest": {"queue": "io"},
-    "workers.tasks.transcribe": {"queue": "gpu"},
-    "workers.tasks.analyze_vision": {"queue": "gpu"},
-    "workers.tasks.llm_*": {"queue": "net"},
+    "workers.tasks.pipeline.ingest*": {"queue": "io"},
+    "workers.tasks.pipeline.transcribe*": {"queue": "gpu"},
+    # Все три группы анализа содержат нейросети — с Этапа 5 и аудио тоже
+    # (AudioSet-классификатор дороже всей видеогруппы на CPU).
+    "workers.tasks.pipeline.analyze_audio*": {"queue": "gpu"},
+    "workers.tasks.pipeline.analyze_speech*": {"queue": "gpu"},
+    "workers.tasks.pipeline.analyze_vision*": {"queue": "gpu"},
+    "workers.tasks.pipeline.llm_*": {"queue": "net"},
     "workers.tasks.*": {"queue": "cpu"},
 }
 ```

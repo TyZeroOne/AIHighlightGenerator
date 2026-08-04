@@ -134,9 +134,7 @@ WHISPER_CHUNK_OVERLAP_SEC=2
 WHISPER_BATCH_SIZE=0              # 0 = авто (16 на GPU, 1 на CPU)
 AUDIO_SAMPLE_RATE=16000
 AUDIO_CHANNELS=1
-SER_MODEL=superb/wav2vec2-base-superb-er
-FACE_DETECTOR=scrfd               # scrfd | opencv_dnn
-AUDIO_EVENT_MODEL=panns_cnn14
+# Модели анализаторов признаков — ниже, в своём разделе.
 
 # --- Детекция сцен ---
 SCENE_DETECTOR=pyscenedetect      # pyscenedetect | ffmpeg
@@ -153,7 +151,22 @@ DEFAULT_PROFILE=default
 SCORE_ALPHA=0.4                   # вес эвристики
 SCORE_BETA=0.5                    # вес LLM
 SCORE_GAMMA=0.1                   # бонус за согласие
-ANALYZERS_DISABLED=
+
+# --- Анализаторы признаков ---
+ANALYZERS_DISABLED=               # ключи через запятую: audio.loudness, vision.motion, …
+VISION_SAMPLE_FPS=3.0             # кадров в секунду на видеоанализ
+VISION_MAX_SIDE=320               # длинная сторона кадра при анализе
+VISION_DETECT_FRAMES=5            # кадров на сцену для детекторов лиц и людей
+AUDIO_EVENT_MODEL=MIT/ast-finetuned-audioset-10-10-0.4593
+AUDIO_EVENT_WINDOW_SEC=10.0
+AUDIO_EVENT_MAX_WINDOWS=3         # окон классификации на сцену
+AUDIO_EVENT_THRESHOLD=0.1         # ниже — событие не пишется
+SER_MODEL=superb/wav2vec2-base-superb-er
+SER_MAX_SPEECH_SEC=5.0            # сколько речи на сцену подавать SER
+FACE_DETECTOR=yunet               # yunet | haar
+FACE_SCORE_THRESHOLD=0.7
+PERSON_DETECTOR=ssdlite320_mobilenet_v3_large   # пусто = не считать людей
+PERSON_SCORE_THRESHOLD=0.5
 
 # --- LLM ---
 ANTHROPIC_API_KEY=

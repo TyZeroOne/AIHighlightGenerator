@@ -16,6 +16,7 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PYTHONPATH=/app/src \
     HF_HOME=/models \
+    TORCH_HOME=/models \
     DEBIAN_FRONTEND=noninteractive
 
 # Ubuntu 24.04 несёт python3.12 в базовых репозиториях — ровно ту версию,
@@ -41,6 +42,10 @@ WORKDIR /app
 FROM base AS deps
 
 COPY pyproject.toml README.md ./
+# Здесь, в отличие от CPU-образа, torch ставится обычным путём — с PyPI.
+# Колесо по умолчанию как раз CUDA-сборка, и на этой машине она нужна:
+# лишние два гигабайта покупают ускорение SER и AudioSet-классификатора
+# на порядок. Отдельного шага с индексом не требуется.
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade pip && \
     pip install "hatchling>=1.25" && \

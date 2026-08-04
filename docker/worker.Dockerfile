@@ -7,7 +7,8 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PYTHONPATH=/app/src \
-    HF_HOME=/models
+    HF_HOME=/models \
+    TORCH_HOME=/models
 
 # ffmpeg — из пакетов Debian, а не сборкой из исходников: версия в bookworm
 # свежая, а экономия 20 минут на каждой сборке важнее экзотических кодеков.
@@ -25,8 +26,22 @@ WORKDIR /app
 FROM base AS deps
 
 COPY pyproject.toml README.md ./
+# PyTorch ставится ОТДЕЛЬНО и из CPU-индекса — до основной установки.
+#
+# С обычного PyPI `pip install torch` притащит CUDA-сборку: полтора десятка
+# пакетов `nvidia-*` и примерно 2.5 ГБ образа, которые на машине без
+# видеокарты не будут использованы ни разу. CPU-колесо — около 200 МБ.
+#
+# Порядок важен: после этой строки torch уже установлен, и `.[worker]`
+# видит удовлетворённое требование, а не идёт за ним на PyPI.
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade pip && \
+    pip install \
+        --index-url https://download.pytorch.org/whl/cpu \
+        --extra-index-url https://pypi.org/simple \
+        torch torchvision
+
+RUN --mount=type=cache,target=/root/.cache/pip \
     pip install "hatchling>=1.25" && \
     pip install ".[worker]"
 

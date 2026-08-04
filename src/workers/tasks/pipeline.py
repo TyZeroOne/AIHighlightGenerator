@@ -18,11 +18,19 @@ from uuid import UUID
 from core.container import get_container
 from core.domain.enums import JobStage
 from core.logging import get_logger
+from core.usecases.analyze import AnalysisResult
 from workers.app import celery_app
 from workers.base import PipelineTask
 from workers.runtime import run_async
 
-__all__ = ["detect_scenes", "extract_audio", "transcribe"]
+__all__ = [
+    "analyze_audio",
+    "analyze_speech",
+    "analyze_vision",
+    "detect_scenes",
+    "extract_audio",
+    "transcribe",
+]
 
 log = get_logger(__name__)
 
@@ -33,6 +41,22 @@ class DetectScenesTask(PipelineTask):
 
 class ExtractAudioTask(PipelineTask):
     stage = JobStage.EXTRACT_AUDIO
+
+
+class AnalyzeAudioTask(PipelineTask):
+    stage = JobStage.ANALYZE_AUDIO
+
+
+class AnalyzeSpeechTask(PipelineTask):
+    stage = JobStage.ANALYZE_SPEECH
+
+
+class AnalyzeVisionTask(PipelineTask):
+    stage = JobStage.ANALYZE_VISION
+    # Разбор кадров двухчасового фильма — самая долгая работа после
+    # распознавания; часового лимита ей мало.
+    time_limit = 4 * 3600
+    soft_time_limit = 4 * 3600 - 300
 
 
 class TranscribeTask(PipelineTask):
@@ -110,3 +134,51 @@ def transcribe(self: TranscribeTask, job_id: str) -> dict[str, Any]:
         "skipped": result.skipped,
         "reused": result.reused,
     }
+
+
+def _analysis_payload(result: AnalysisResult) -> dict[str, Any]:
+    return {
+        "job_id": str(result.job_id),
+        "stage": result.stage.value,
+        "analyzers": list(result.analyzers),
+        "failed": dict(result.failed),
+        "features": result.feature_count,
+        "scenes": result.scenes_with_features,
+        "duration_sec": result.duration_sec,
+        "skipped": result.skipped,
+        "reused": result.reused,
+    }
+
+
+@celery_app.task(
+    base=AnalyzeAudioTask,
+    bind=True,
+    name="workers.tasks.pipeline.analyze_audio",
+)
+def analyze_audio(self: AnalyzeAudioTask, job_id: str) -> dict[str, Any]:
+    """Аудиопризнаки: громкость, паузы, события.
+
+    Падение одного анализатора не роняет этап: джоб становится ``partial``,
+    остальные признаки остаются на месте (док 04, §4.5).
+    """
+    return _analysis_payload(run_async(get_container().analyze_audio.execute(UUID(job_id))))
+
+
+@celery_app.task(
+    base=AnalyzeSpeechTask,
+    bind=True,
+    name="workers.tasks.pipeline.analyze_speech",
+)
+def analyze_speech(self: AnalyzeSpeechTask, job_id: str) -> dict[str, Any]:
+    """Речевые признаки: темп, плотность, эмоция."""
+    return _analysis_payload(run_async(get_container().analyze_speech.execute(UUID(job_id))))
+
+
+@celery_app.task(
+    base=AnalyzeVisionTask,
+    bind=True,
+    name="workers.tasks.pipeline.analyze_vision",
+)
+def analyze_vision(self: AnalyzeVisionTask, job_id: str) -> dict[str, Any]:
+    """Видеопризнаки: движение, склейки, лица, динамика кадра."""
+    return _analysis_payload(run_async(get_container().analyze_vision.execute(UUID(job_id))))

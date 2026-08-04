@@ -18,6 +18,7 @@ import asyncio
 import hashlib
 import json
 import sys
+from collections.abc import Sequence
 from uuid import UUID, uuid4
 
 from core.container import get_container
@@ -215,6 +216,46 @@ async def _transcribe(
     return 0
 
 
+async def _analyze(*, job_id: UUID, groups: Sequence[str], show: int) -> int:
+    """Посчитать признаки по уже разбитому на сцены джобу."""
+    container = get_container()
+    stages = {
+        "audio": container.analyze_audio,
+        "speech": container.analyze_speech,
+        "vision": container.analyze_vision,
+    }
+
+    for group in groups:
+        usecase = stages.get(group)
+        if usecase is None:
+            print(f"Неизвестная группа: {group}", file=sys.stderr)
+            return 1
+
+        result = await usecase.execute(job_id)
+        status = "пропущен" if result.skipped else ", ".join(result.analyzers) or "—"
+        print(f"{group:7}: {status}")
+        if result.failed:
+            for key, message in sorted(result.failed.items()):
+                print(f"         ! {key}: {message}", file=sys.stderr)
+        if not result.skipped:
+            print(
+                f"         признаков {result.feature_count} "
+                f"на {result.scenes_with_features} сценах за {result.duration_sec:.2f} с"
+            )
+
+    if show:
+        async with container.uow() as uow:
+            scenes = await uow.scenes.list_for_job(job_id)
+        print("\nпризнаки первых сцен:")
+        for scene in scenes[:show]:
+            values = ", ".join(
+                f"{key.split('.', 1)[1]}={value.value:.2f}"
+                for key, value in sorted(scene.features.items())
+            )
+            print(f"  {scene.index:4d}  {format_timecode(scene.range.start)}  {values or '—'}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="manage", description="Служебные команды проекта")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -244,6 +285,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     speech.add_argument("--show", type=int, default=10, help="Сколько реплик напечатать")
 
+    analyze = sub.add_parser("analyze", help="Посчитать признаки по сценам джоба")
+    analyze.add_argument("--job-id", required=True, type=UUID)
+    analyze.add_argument(
+        "--groups",
+        default="audio",
+        help="Группы через запятую: audio, speech, vision",
+    )
+    analyze.add_argument("--show", type=int, default=10, help="Сколько сцен напечатать")
+
     args = parser.parse_args(argv)
     configure_logging(level="WARNING", fmt="console")
 
@@ -262,6 +312,9 @@ def main(argv: list[str] | None = None) -> int:
                 show=args.show,
             )
         )
+    if args.command == "analyze":
+        groups = [item.strip() for item in args.groups.split(",") if item.strip()]
+        return asyncio.run(_analyze(job_id=args.job_id, groups=groups, show=args.show))
     return 1
 
 

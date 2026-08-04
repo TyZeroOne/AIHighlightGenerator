@@ -137,6 +137,15 @@ class TestConfiguration:
 
         assert route["queue"].name == "io"
 
+    def test_every_analysis_stage_goes_to_the_gpu_queue(self) -> None:
+        """Все три группы анализа содержат нейросети — с Этапа 5 и аудио тоже
+        (AudioSet-классификатор). На конфигурации по умолчанию это ничего
+        не меняет: CPU-воркер слушает и очередь `gpu`."""
+        for task in ("analyze_audio", "analyze_speech", "analyze_vision"):
+            route = celery_app.amqp.router.route({}, f"workers.tasks.pipeline.{task}")
+
+            assert route["queue"].name == "gpu", task
+
     def test_every_routed_queue_is_declared(self) -> None:
         """Маршрут в необъявленную очередь — это задача, которую никто
         не заберёт. Отказ при этом молчаливый: сообщение просто лежит

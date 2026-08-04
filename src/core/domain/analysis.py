@@ -41,14 +41,19 @@ class AnalysisContext:
     job_id: UUID
     video_id: UUID
     window: MediaWindow
-    media: LocalMedia
     workdir: Path
+    #: Видеофайл. ``None`` — он не скачивался, потому что этому этапу не нужен.
+    #: Аудиоанализу видео ни к чему, а тянуть ради него двадцать гигабайт
+    #: из S3 — плата за ничто.
+    media: LocalMedia | None = None
     audio: AudioTrack | None = None
     transcript: Transcript | None = None
 
     def available_artifacts(self) -> frozenset[str]:
         """Какое сырьё реально есть. Отсюда планировщик знает, что можно запускать."""
-        artifacts = {ARTIFACT_VIDEO} if self.media.info.has_video else set()
+        artifacts: set[str] = set()
+        if self.media is not None and self.media.info.has_video:
+            artifacts.add(ARTIFACT_VIDEO)
         if self.audio is not None:
             artifacts.add(ARTIFACT_AUDIO)
         if self.transcript is not None and not self.transcript.is_empty:
