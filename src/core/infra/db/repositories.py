@@ -14,10 +14,12 @@ from uuid import UUID, uuid4
 from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.domain.entities import Job, Scene, UploadSession, User, Video
+from core.domain.entities import Clip, Job, Scene, UploadSession, User, Video
 from core.domain.enums import AssetKind, AssetOwnerType, JobStatus, VideoStatus
 from core.domain.media import Transcript
 from core.infra.db.mappers import (
+    clip_to_domain,
+    clip_to_orm_values,
     job_to_domain,
     job_to_orm_values,
     scene_to_domain,
@@ -31,6 +33,8 @@ from core.infra.db.mappers import (
 )
 from core.infra.db.models import (
     AssetORM,
+    ClipORM,
+    ClipSceneORM,
     JobORM,
     SceneORM,
     TranscriptSegmentORM,
@@ -41,6 +45,7 @@ from core.infra.db.models import (
 
 __all__ = [
     "AssetRepository",
+    "SqlAlchemyClipRepository",
     "SqlAlchemyJobRepository",
     "SqlAlchemySceneRepository",
     "SqlAlchemyTranscriptRepository",
@@ -450,3 +455,60 @@ class SqlAlchemyUploadSessionRepository:
         await self._session.execute(
             delete(UploadSessionORM).where(UploadSessionORM.id == upload_id)
         )
+
+
+class SqlAlchemyClipRepository:
+    """Клипы и их связь со сценами.
+
+    Связка ``clip_scenes`` пишется вместе с клипом, а не отдельным вызовом:
+    клип без сцен — потерянная связь, по которой потом не ответить на вопрос
+    «из чего собран этот момент».
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def bulk_add(self, clips: Sequence[Clip]) -> None:
+        if not clips:
+            return
+        await self._session.execute(
+            insert(ClipORM).values([clip_to_orm_values(clip) for clip in clips])
+        )
+        links = [
+            {"clip_id": clip.id, "scene_id": scene_id}
+            for clip in clips
+            for scene_id in clip.scene_ids
+        ]
+        if links:
+            await self._session.execute(insert(ClipSceneORM).values(links))
+
+    async def get(self, clip_id: UUID) -> Clip | None:
+        row = (
+            await self._session.execute(select(ClipORM).where(ClipORM.id == clip_id))
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+        return clip_to_domain(row, await self._scene_ids(clip_id))
+
+    async def list_for_job(self, job_id: UUID) -> Sequence[Clip]:
+        stmt = select(ClipORM).where(ClipORM.job_id == job_id).order_by(ClipORM.rank)
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [clip_to_domain(row, await self._scene_ids(row.id)) for row in rows]
+
+    async def update(self, clip: Clip) -> Clip:
+        values = clip_to_orm_values(clip)
+        values.pop("id", None)
+        await self._session.execute(update(ClipORM).where(ClipORM.id == clip.id).values(**values))
+        return clip
+
+    async def delete_for_job(self, job_id: UUID) -> None:
+        """Убрать клипы джоба перед повторным отбором.
+
+        Нужна ровно та же идемпотентность, что у сцен: повторный запуск
+        этапа не должен дописывать второй комплект клипов к первому.
+        """
+        await self._session.execute(delete(ClipORM).where(ClipORM.job_id == job_id))
+
+    async def _scene_ids(self, clip_id: UUID) -> list[UUID]:
+        stmt = select(ClipSceneORM.scene_id).where(ClipSceneORM.clip_id == clip_id)
+        return list((await self._session.execute(stmt)).scalars().all())

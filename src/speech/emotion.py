@@ -78,6 +78,11 @@ DEFAULT_MAX_SPEECH_SEC: Final = 5.0
 #: попросту нет, а модель всё равно выдаст уверенный ответ.
 _MIN_SPEECH_SEC: Final = 0.6
 
+#: Минимальный осмысленный остаток бюджета речи. Меньше — не берём кусок
+#: вовсе: пятидесятая доля секунды ничего не добавит к оценке эмоции,
+#: зато накопленная ошибка float делает такой отрезок вырожденным.
+_MIN_SPAN_SEC: Final = 0.05
+
 
 class EmotionScorer(Protocol):
     """Оценка вероятностей эмоциональных классов на куске речи."""
@@ -100,7 +105,13 @@ def speech_spans(
     spans: list[TimeRange] = []
     remaining = limit_sec
     for segment in transcript.within(scene):
-        if remaining <= 0:
+        # Сравнение с порогом, а не с нулём, и это не перестраховка.
+        # ``remaining -= piece.duration`` накапливает ошибку float, и на
+        # реальном транскрипте остаток обращался в 3e-15: больше нуля,
+        # поэтому цикл продолжался, но обрезанный по нему кусок получал
+        # нулевую длительность, и TimeRange падал на проверке границ.
+        # Найдено живым прогоном на трейлере.
+        if remaining < _MIN_SPAN_SEC:
             break
         piece = segment.range.intersection(scene)
         if piece is None or piece.duration <= 0:

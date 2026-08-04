@@ -12,15 +12,26 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from core.domain.entities import Job, Scene, StageState, UploadSession, User, Video
+from core.domain.entities import (
+    Clip,
+    ClipMetadata,
+    Job,
+    Scene,
+    StageState,
+    UploadSession,
+    User,
+    Video,
+)
 from core.domain.enums import JobStage
 from core.domain.media import MediaInfo, TranscriptSegment, TranscriptWord
 from core.domain.values import FeatureValue, Score, TimeRange
 from core.infra.db.models import (
+    ClipORM,
     JobORM,
     SceneORM,
     TranscriptSegmentORM,
@@ -30,6 +41,8 @@ from core.infra.db.models import (
 )
 
 __all__ = [
+    "clip_to_domain",
+    "clip_to_orm_values",
     "job_to_domain",
     "job_to_orm_values",
     "scene_to_domain",
@@ -358,3 +371,44 @@ def upload_session_to_domain(row: UploadSessionORM) -> UploadSession:
         completed=row.completed,
         created_at=row.created_at,
     )
+
+
+# ------------------------------------------------------------------ clip
+def clip_to_domain(row: ClipORM, scene_ids: Sequence[UUID] = ()) -> Clip:
+    metadata = None
+    if row.title or row.description or row.hashtags:
+        metadata = ClipMetadata(
+            title=row.title or "",
+            description=row.description or "",
+            hashtags=tuple(row.hashtags or ()),
+        )
+    return Clip(
+        id=row.id,
+        job_id=row.job_id,
+        video_id=row.video_id,
+        rank=row.rank,
+        range=TimeRange(float(row.start_sec), float(row.end_sec)),
+        score=float(row.score),
+        category=row.category,
+        reason=row.reason or "",
+        metadata=metadata,
+        scene_ids=tuple(scene_ids),
+    )
+
+
+def clip_to_orm_values(clip: Clip) -> dict[str, object]:
+    metadata = clip.metadata
+    return {
+        "id": clip.id,
+        "job_id": clip.job_id,
+        "video_id": clip.video_id,
+        "rank": clip.rank,
+        "start_sec": Decimal(str(round(clip.range.start, 3))),
+        "end_sec": Decimal(str(round(clip.range.end, 3))),
+        "score": Decimal(str(round(clip.score, 3))),
+        "category": clip.category,
+        "reason": clip.reason,
+        "title": metadata.title if metadata else None,
+        "description": metadata.description if metadata else None,
+        "hashtags": list(metadata.hashtags) if metadata else None,
+    }

@@ -19,7 +19,7 @@ from types import TracebackType
 from typing import Self
 from uuid import UUID, uuid4
 
-from core.domain.entities import Job, Scene, UploadSession, User, Video
+from core.domain.entities import Clip, Job, Scene, UploadSession, User, Video
 from core.domain.enums import AssetKind, AssetOwnerType, JobStatus, UserRole, VideoStatus
 from core.domain.errors import ObjectNotFoundError
 from core.domain.media import (
@@ -609,6 +609,27 @@ class FakeSourceProvider:
         self.released += 1
 
 
+class FakeClipRepository:
+    def __init__(self) -> None:
+        self.clips: list[Clip] = []
+
+    async def bulk_add(self, clips: Sequence[Clip]) -> None:
+        self.clips.extend(clips)
+
+    async def get(self, clip_id: UUID) -> Clip | None:
+        return next((clip for clip in self.clips if clip.id == clip_id), None)
+
+    async def list_for_job(self, job_id: UUID) -> Sequence[Clip]:
+        return sorted((clip for clip in self.clips if clip.job_id == job_id), key=lambda c: c.rank)
+
+    async def update(self, clip: Clip) -> Clip:
+        self.clips = [clip if item.id == clip.id else item for item in self.clips]
+        return clip
+
+    async def delete_for_job(self, job_id: UUID) -> None:
+        self.clips = [clip for clip in self.clips if clip.job_id != job_id]
+
+
 class FakeUnitOfWork:
     """UoW без транзакций: репозитории общие, коммит только считается.
 
@@ -627,6 +648,7 @@ class FakeUnitOfWork:
         jobs: FakeJobRepository | None = None,
         scenes: FakeSceneRepository | None = None,
         transcripts: FakeTranscriptRepository | None = None,
+        clips: FakeClipRepository | None = None,
     ) -> None:
         self.users = users or FakeUserRepository()
         self.videos = videos or FakeVideoRepository()
@@ -635,6 +657,7 @@ class FakeUnitOfWork:
         self.jobs = jobs or FakeJobRepository()
         self.scenes = scenes or FakeSceneRepository()
         self.transcripts = transcripts or FakeTranscriptRepository()
+        self.clips = clips or FakeClipRepository()
         self.commits = 0
         self.rollbacks = 0
 

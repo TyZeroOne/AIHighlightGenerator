@@ -30,6 +30,8 @@ __all__ = [
     "detect_scenes",
     "extract_audio",
     "llm_rank",
+    "score_scenes",
+    "select_highlights",
     "transcribe",
 ]
 
@@ -50,6 +52,14 @@ class AnalyzeAudioTask(PipelineTask):
 
 class AnalyzeSpeechTask(PipelineTask):
     stage = JobStage.ANALYZE_SPEECH
+
+
+class ScoreScenesTask(PipelineTask):
+    stage = JobStage.SCORE_SCENES
+
+
+class SelectHighlightsTask(PipelineTask):
+    stage = JobStage.SELECT_HIGHLIGHTS
 
 
 class LLMRankTask(PipelineTask):
@@ -217,4 +227,51 @@ def llm_rank(self: LLMRankTask, job_id: str) -> dict[str, Any]:
         "skipped": result.skipped,
         "reused": result.reused,
         "degraded": result.degraded,
+    }
+
+
+@celery_app.task(
+    base=ScoreScenesTask,
+    bind=True,
+    name="workers.tasks.pipeline.score_scenes",
+)
+def score_scenes(self: ScoreScenesTask, job_id: str) -> dict[str, Any]:
+    """Эвристический скор сцен.
+
+    Идёт до LLM-этапа: модель получает посчитанные здесь сигналы,
+    а не сырые признаки (док 06, §6.4).
+    """
+    result = run_async(get_container().score_scenes.execute(UUID(job_id)))
+    return {
+        "job_id": str(result.job_id),
+        "scenes": result.scenes_scored,
+        "mean_score": result.mean_score,
+        "max_score": result.max_score,
+        "duration_sec": result.duration_sec,
+        "skipped": result.skipped,
+        "reused": result.reused,
+    }
+
+
+@celery_app.task(
+    base=SelectHighlightsTask,
+    bind=True,
+    name="workers.tasks.pipeline.select_highlights",
+)
+def select_highlights(self: SelectHighlightsTask, job_id: str) -> dict[str, Any]:
+    """Отбор моментов и запись клипов.
+
+    Здесь же эвристика сводится с оценкой модели: до этого этапа вердиктов
+    в базе ещё нет, а после — уже поздно, отбор идёт по итоговому скору.
+    """
+    result = run_async(get_container().select_highlights.execute(UUID(job_id)))
+    return {
+        "job_id": str(result.job_id),
+        "clips": result.clips,
+        "scenes": result.scenes,
+        "top_score": result.top_score,
+        "total_duration_sec": result.total_duration_sec,
+        "duration_sec": result.duration_sec,
+        "skipped": result.skipped,
+        "reused": result.reused,
     }

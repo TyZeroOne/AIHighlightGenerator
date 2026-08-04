@@ -258,6 +258,76 @@ async def _rank(*, job_id: UUID, show: int) -> int:
     return 0
 
 
+async def _select(
+    *,
+    job_id: UUID,
+    profile: str | None,
+    budget: float | None,
+    show: int,
+) -> int:
+    """Посчитать эвристику и отобрать моменты.
+
+    Оба этапа сразу: по отдельности они бессмысленны — скор без отбора
+    никуда не идёт, а отбор без скора не по чему делать.
+    """
+    container = get_container()
+    name = profile or container.settings.default_profile
+
+    if profile:
+        # Профиль на один прогон: пересобираем сценарии, а не правим конфиг.
+        # Так можно сравнить movie и podcast на одном джобе, ничего не трогая.
+        from core.usecases.score import ScoreScenes
+        from core.usecases.select import SelectHighlights
+
+        scorer = ScoreScenes(uow_factory=container.uow, scorer=container.detector, profile=name)
+        selector = SelectHighlights(
+            uow_factory=container.uow, selector=container.detector, profile=name
+        )
+    else:
+        scorer = container.score_scenes
+        selector = container.select_highlights
+
+    print(f"профиль : {name}")
+
+    scored = await scorer.execute(job_id)
+    if scored.skipped:
+        print("скоринг : пропущен (нет сцен)")
+        return 1
+    if scored.reused:
+        print("скоринг : уже выполнен ранее")
+    else:
+        print(
+            f"скоринг : {scored.scenes_scored} сцен, "
+            f"средний {scored.mean_score}, максимум {scored.max_score}"
+        )
+
+    result = await selector.execute(job_id, total_duration_sec=budget)
+    if result.skipped:
+        print("отбор   : пропущен")
+        return 1
+    if result.reused:
+        print("отбор   : уже выполнен ранее")
+        return 0
+
+    print(f"клипов  : {result.clips} из {result.scenes} сцен")
+    print(f"лучший  : {result.top_score}")
+    print(f"всего   : {result.total_duration_sec:.1f} с")
+
+    if show:
+        async with container.uow() as uow:
+            clips = await uow.clips.list_for_job(job_id)
+        print("\nотобранные моменты:")
+        for clip in clips[:show]:
+            print(
+                f"  {clip.rank:2d}. {clip.score:5.1f} {clip.category:12} "
+                f"{format_timecode(clip.range.start)} → {format_timecode(clip.range.end)} "
+                f"({clip.range.duration:5.1f} с)"
+            )
+            if clip.reason:
+                print(f"      {clip.reason}")
+    return 0
+
+
 async def _analyze(*, job_id: UUID, groups: Sequence[str], show: int) -> int:
     """Посчитать признаки по уже разбитому на сцены джобу."""
     container = get_container()
@@ -340,6 +410,16 @@ def main(argv: list[str] | None = None) -> int:
     rank.add_argument("--job-id", required=True, type=UUID)
     rank.add_argument("--show", type=int, default=10, help="Сколько сцен напечатать")
 
+    select = sub.add_parser("select", help="Посчитать скор и отобрать моменты")
+    select.add_argument("--job-id", required=True, type=UUID)
+    select.add_argument(
+        "--profile", default=None, help="Профиль отбора: default, movie, podcast, lecture, gaming"
+    )
+    select.add_argument(
+        "--budget", type=float, default=None, help="Суммарная длительность клипов, с"
+    )
+    select.add_argument("--show", type=int, default=10, help="Сколько клипов напечатать")
+
     args = parser.parse_args(argv)
     configure_logging(level="WARNING", fmt="console")
 
@@ -363,6 +443,15 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(_analyze(job_id=args.job_id, groups=groups, show=args.show))
     if args.command == "rank":
         return asyncio.run(_rank(job_id=args.job_id, show=args.show))
+    if args.command == "select":
+        return asyncio.run(
+            _select(
+                job_id=args.job_id,
+                profile=args.profile,
+                budget=args.budget,
+                show=args.show,
+            )
+        )
     return 1
 
 

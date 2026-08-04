@@ -39,6 +39,8 @@ from core.usecases.chunked_upload import (
 )
 from core.usecases.detect_scenes import DetectScenes, SceneDetectionSettings
 from core.usecases.rank import RankScenes
+from core.usecases.score import ScoreScenes
+from core.usecases.select import SelectHighlights
 from core.usecases.transcribe import ExtractAudio, Transcribe
 from core.usecases.upload_video import (
     DeleteVideo,
@@ -51,6 +53,8 @@ from core.usecases.upload_video import (
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+    from highlight_detector.service import DetectorService
 
 __all__ = ["Container", "get_container", "reset_container"]
 
@@ -402,6 +406,32 @@ class Container:
             stage=JobStage.ANALYZE_VISION,
             group="vision",
             needs=frozenset({ARTIFACT_VIDEO}),
+        )
+
+    # ------------------------------------------------------- Этап 7
+    @cached_property
+    def detector(self) -> DetectorService:
+        """Скоринг и отбор. Один объект на оба этапа: они делят профили,
+        формулы сигналов и правила нормализации, и разводить их по разным
+        реализациям значило бы дублировать всё это."""
+        from highlight_detector.service import DetectorService
+
+        return DetectorService()
+
+    @cached_property
+    def score_scenes(self) -> ScoreScenes:
+        return ScoreScenes(
+            uow_factory=self.uow,
+            scorer=self.detector,
+            profile=self.settings.default_profile,
+        )
+
+    @cached_property
+    def select_highlights(self) -> SelectHighlights:
+        return SelectHighlights(
+            uow_factory=self.uow,
+            selector=self.detector,
+            profile=self.settings.default_profile,
         )
 
     # ------------------------------------------------------- Этап 6

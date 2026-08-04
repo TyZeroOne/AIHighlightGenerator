@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from core.infra.db.repositories import (
     AssetRepository,
+    SqlAlchemyClipRepository,
     SqlAlchemyJobRepository,
     SqlAlchemySceneRepository,
     SqlAlchemyTranscriptRepository,
@@ -48,6 +49,7 @@ class SqlAlchemyUnitOfWork:
         self.jobs = SqlAlchemyJobRepository(self._session)
         self.scenes = SqlAlchemySceneRepository(self._session)
         self.transcripts = SqlAlchemyTranscriptRepository(self._session)
+        self.clips = SqlAlchemyClipRepository(self._session)
         return self
 
     async def __aexit__(

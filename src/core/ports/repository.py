@@ -178,6 +178,14 @@ class ClipRepository(Protocol):
     async def list_for_job(self, job_id: UUID) -> Sequence[Clip]: ...
     async def update(self, clip: Clip) -> Clip: ...
 
+    async def delete_for_job(self, job_id: UUID) -> None:
+        """Убрать клипы джоба перед повторным отбором.
+
+        Та же идемпотентность, что у сцен: повторный запуск этапа не должен
+        дописывать второй комплект клипов к первому.
+        """
+        ...
+
 
 class UnitOfWork(Protocol):
     """Транзакционная граница.
@@ -219,6 +227,9 @@ class UnitOfWork(Protocol):
 
     @property
     def transcripts(self) -> TranscriptRepository: ...
+
+    @property
+    def clips(self) -> ClipRepository: ...
 
     async def __aenter__(self) -> Self: ...
 
