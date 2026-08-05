@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -50,6 +50,7 @@ __all__ = [
     "job_to_orm_values",
     "scene_to_domain",
     "scene_to_orm_values",
+    "stages_to_json",
     "transcript_segment_to_domain",
     "transcript_segment_to_orm_values",
     "upload_session_to_domain",
@@ -212,7 +213,13 @@ def _stages_to_domain(raw: dict[str, Any]) -> dict[JobStage, StageState]:
     return states
 
 
-def _stages_to_json(job: Job) -> dict[str, Any]:
+def stages_to_json(states: Mapping[JobStage, StageState]) -> dict[str, Any]:
+    """Состояния этапов → JSONB.
+
+    Отдельно от ``_stages_to_json(job)``, потому что атомарная запись
+    одного этапа (``write_stage``) собирает словарь состояний сама,
+    без готового объекта джоба.
+    """
     return {
         stage.value: {
             "status": state.status,
@@ -220,8 +227,12 @@ def _stages_to_json(job: Job) -> dict[str, Any]:
             "duration_sec": state.duration_sec,
             "error": state.error,
         }
-        for stage, state in job.stages.items()
+        for stage, state in states.items()
     }
+
+
+def _stages_to_json(job: Job) -> dict[str, Any]:
+    return stages_to_json(job.stages)
 
 
 # ----------------------------------------------------------------- scene

@@ -13,10 +13,9 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from uuid import UUID
 
-from core.domain.entities import Job, Video
+from core.domain.entities import Job, StageState, Video
 from core.domain.enums import JobStage, JobStatus
 from core.domain.errors import JobCancelledError, NotFoundError, ValidationError
 from core.domain.params import AnalysisParams
@@ -65,11 +64,14 @@ class StageTracker:
         return job, video
 
     async def begin(self, job: Job) -> None:
-        await self._write(job.with_stage(self._stage, "running"), status=JobStatus.RUNNING)
+        await self._write(job, "running", status=JobStatus.RUNNING)
 
     async def succeed(self, job: Job, *, duration_sec: float) -> None:
         await self._write(
-            job.with_stage(self._stage, "succeeded", progress=100.0, duration_sec=duration_sec),
+            job,
+            "succeeded",
+            progress=100.0,
+            duration_sec=duration_sec,
             status=JobStatus.RUNNING,
         )
 
@@ -82,15 +84,17 @@ class StageTracker:
         сломалась модель или речи не было изначально.
         """
         await self._write(
-            job.with_stage(self._stage, "skipped", progress=100.0, error=reason),
-            status=JobStatus.RUNNING,
+            job, "skipped", progress=100.0, stage_error=reason, status=JobStatus.RUNNING
         )
         log.info("stage.skipped", stage=self._stage.value, job_id=str(job.id), reason=reason)
 
     async def fail(self, job: Job, error: Exception, *, duration_sec: float) -> None:
         message = f"{type(error).__name__}: {error}"
         await self._write(
-            job.with_stage(self._stage, "failed", duration_sec=duration_sec, error=message),
+            job,
+            "failed",
+            duration_sec=duration_sec,
+            stage_error=message,
             status=JobStatus.FAILED,
             error={
                 "stage": self._stage.value,
@@ -107,15 +111,21 @@ class StageTracker:
         файла выглядит снаружи как двадцать минут полной тишины.
         """
         await self._write(
-            job.with_stage(self._stage, "running", progress=min(max(fraction, 0.0), 1.0) * 100.0),
+            job,
+            "running",
+            progress=min(max(fraction, 0.0), 1.0) * 100.0,
             status=JobStatus.RUNNING,
         )
 
     async def _write(
         self,
         job: Job,
+        state: str,
         *,
         status: JobStatus,
+        progress: float = 0.0,
+        duration_sec: float | None = None,
+        stage_error: str | None = None,
         error: dict[str, object] | None = None,
     ) -> None:
         """Записать состояние этапа отдельной короткой транзакцией.
@@ -124,10 +134,28 @@ class StageTracker:
         снаружи немедленно: она источник прогресса в API и признак живости
         джоба для уборщика зависших. Внутри общей транзакции этапа она стала
         бы видна только по его завершении, то есть через минуты.
+
+        И **только своё поле**, а не джоб целиком. Ветки конвейера идут
+        параллельно, и запись объекта, прочитанного в начале этапа,
+        затирает отметки соседней ветки. Живой прогон Этапа 10 показал
+        именно это: джоб застрял на 52 %, потеряв запись об успешно
+        отработавшем видеоанализе, — тот же lost update, что был
+        с ``jobs.cost`` на Этапе 6.
         """
-        updated = replace(job, status=status, error=error if error is not None else job.error)
         async with self._uow_factory() as uow:
-            await uow.jobs.update(updated)
+            await uow.jobs.write_stage(
+                job.id,
+                self._stage,
+                StageState(
+                    stage=self._stage,
+                    status=state,
+                    progress=progress,
+                    duration_sec=duration_sec,
+                    error=stage_error,
+                ),
+                status=status,
+                error=error,
+            )
             await uow.commit()
 
 

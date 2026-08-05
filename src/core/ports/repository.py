@@ -14,8 +14,17 @@ from types import TracebackType
 from typing import Protocol, Self
 from uuid import UUID
 
-from core.domain.entities import Asset, Clip, Job, Scene, UploadSession, User, Video
-from core.domain.enums import AssetKind, AssetOwnerType, JobStatus
+from core.domain.entities import (
+    Asset,
+    Clip,
+    Job,
+    Scene,
+    StageState,
+    UploadSession,
+    User,
+    Video,
+)
+from core.domain.enums import AssetKind, AssetOwnerType, JobStage, JobStatus
 from core.domain.media import Transcript
 
 __all__ = [
@@ -150,6 +159,31 @@ class JobRepository(Protocol):
         ...
 
     async def update(self, job: Job) -> Job: ...
+
+    async def write_stage(
+        self,
+        job_id: UUID,
+        stage: JobStage,
+        state: StageState,
+        *,
+        status: JobStatus,
+        error: dict[str, object] | None = None,
+    ) -> Job | None:
+        """Записать состояние ОДНОГО этапа, не трогая остальные.
+
+        Отдельный метод, а не ``update`` с готовым объектом, потому что
+        ветки конвейера идут параллельно. Обычная запись читает джоб
+        целиком, меняет своё поле и сохраняет всё обратно — и вторая
+        ветка, закончившаяся позже, затирает отметку первой.
+
+        Это не теория: живой прогон показал джоб, застрявший на 52 %,
+        у которого пропала запись об успешно отработавшем видеоанализе.
+        Классический lost update — тот же, что был с ``jobs.cost``
+        на Этапе 6, но здесь он проявился только тогда, когда в графе
+        появились настоящие параллельные ветки.
+        """
+        ...
+
     async def list_by_status(self, status: JobStatus, *, limit: int) -> Sequence[Job]: ...
 
     async def list_for_user(

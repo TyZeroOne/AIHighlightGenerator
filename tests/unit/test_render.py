@@ -27,7 +27,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from core.domain.entities import Clip, Job, StageState, Video
+from core.domain.entities import Clip, Job, StageState, Video, compute_progress
 from core.domain.enums import (
     AssetKind,
     AssetOwnerType,
@@ -412,6 +412,31 @@ class FakeJobRepo:
     async def update(self, job: Job) -> Job:
         self.job = job
         return job
+
+    async def write_stage(
+        self,
+        job_id: UUID,
+        stage: JobStage,
+        state: StageState,
+        *,
+        status: JobStatus,
+        error: dict[str, object] | None = None,
+    ) -> Job | None:
+        """То же, что в настоящем репозитории: меняем только своё поле."""
+        job = self.job if getattr(self, "job", None) is not None else None
+        if job is None or job.id != job_id:
+            return None
+        states = dict(job.stages)
+        states[stage] = state
+        self.job = replace(
+            job,
+            stage=stage,
+            stages=states,
+            progress=compute_progress(states),
+            status=status,
+            error=error if error is not None else job.error,
+        )
+        return self.job
 
 
 class FakeVideoRepo:

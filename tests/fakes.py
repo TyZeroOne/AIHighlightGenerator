@@ -13,14 +13,31 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import AsyncIterator, Callable, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 from typing import Self
 from uuid import UUID, uuid4
 
-from core.domain.entities import Clip, Job, Scene, UploadSession, User, Video
-from core.domain.enums import AssetKind, AssetOwnerType, JobStatus, UserRole, VideoStatus
+from core.domain.entities import (
+    Clip,
+    Job,
+    Scene,
+    StageState,
+    UploadSession,
+    User,
+    Video,
+    compute_progress,
+)
+from core.domain.enums import (
+    AssetKind,
+    AssetOwnerType,
+    JobStage,
+    JobStatus,
+    UserRole,
+    VideoStatus,
+)
 from core.domain.errors import ObjectNotFoundError
 from core.domain.media import (
     AudioTrack,
@@ -392,6 +409,39 @@ class FakeJobRepository:
     async def update(self, job: Job) -> Job:
         self.jobs[job.id] = job
         return job
+
+    async def write_stage(
+        self,
+        job_id: UUID,
+        stage: JobStage,
+        state: StageState,
+        *,
+        status: JobStatus,
+        error: dict[str, object] | None = None,
+    ) -> Job | None:
+        """Атомарная запись одного этапа — как в настоящем репозитории.
+
+        Фейк обязан вести себя так же в главном: менять **только** своё
+        поле. Если бы он писал джоб целиком, тесты проходили бы, а живой
+        конвейер терял отметки параллельных веток — ровно то, что
+        и случилось на Этапе 10 до появления этого метода.
+        """
+        job = self.jobs.get(job_id)
+        if job is None:
+            return None
+
+        states = dict(job.stages)
+        states[stage] = state
+        updated = replace(
+            job,
+            stage=stage,
+            stages=states,
+            progress=compute_progress(states),
+            status=status,
+            error=error if error is not None else job.error,
+        )
+        self.jobs[job_id] = updated
+        return updated
 
     async def list_by_status(self, status: JobStatus, *, limit: int = 50) -> Sequence[Job]:
         return [job for job in self.jobs.values() if job.status is status][:limit]

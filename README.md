@@ -129,62 +129,29 @@ docker compose exec api python -m manage create-user --email you@example.com
 curl -X POST http://localhost:8000/api/v1/upload -H "X-API-Key: hg_..." -F "file=@movie.mp4"
 ```
 
-Разбить загруженное видео на сцены (`POST /analyze` появится на Этапе 10):
+Запустить весь конвейер одним запросом:
 
 ```bash
-docker compose exec worker-cpu python -m manage detect-scenes --video-id <uuid> --enqueue
+curl -X POST http://localhost:8000/api/v1/jobs -H "X-API-Key: hg_..." -H "Content-Type: application/json" -d '{"video_id":"<uuid>","profile":"movie","max_clips":5}'
 ```
 
-Без `--enqueue` этап выполняется на месте и печатает найденные сцены;
-с ним — уходит в очередь `cpu` и выполняется на воркере.
+В ответе `job_id` и статус `queued`. Дальше видео проходит все этапы само:
+сцены → аудио → речь → признаки → скоринг → модель → отбор → нарезка →
+субтитры → метаданные → манифест.
 
-Распознать речь (сцены → аудио → транскрипт одной цепочкой):
+Повторный запрос с теми же параметрами вернёт уже посчитанный джоб,
+а не запустит работу заново. Нужен пересчёт — добавьте `"force": true`.
+
+Следить за прогрессом:
 
 ```bash
-docker compose exec worker-cpu python -m manage transcribe --video-id <uuid> --enqueue
+curl "http://localhost:8000/api/v1/jobs/<job_id>/status" -H "X-API-Key: hg_..."
 ```
 
-```bash
-curl "http://localhost:8000/api/v1/jobs/<job_id>/transcript?format=srt" -H "X-API-Key: hg_..."
-```
-
-Посчитать признаки сцен — громкость, паузы, темп речи, движение, склейки,
-динамику кадра:
+Или потоком, без поллинга (Server-Sent Events):
 
 ```bash
-docker compose exec worker-cpu python -m manage analyze --job-id <uuid> --groups audio,speech,vision
-```
-
-Группы независимы и могут считаться на разных воркерах. При первом запуске
-качаются веса — в том `models`, рядом с моделью распознавания речи:
-AudioSet-классификатор 331 МБ, SER 722 МБ, детектор людей 14 МБ,
-YuNet 256 КБ. Итого чуть больше гигабайта.
-
-Лишний анализатор отключается через `ANALYZERS_DISABLED` — например,
-`ANALYZERS_DISABLED=audio.events,vision.faces` убирает самые дорогие
-и возвращает этап к арифметике без нейросетей.
-
-Оценить сцены моделью, отобрать моменты и посмотреть, что выбралось:
-
-```bash
-docker compose exec worker-cpu python -m manage rank --job-id <uuid>
-```
-
-```bash
-docker compose exec worker-cpu python -m manage select --job-id <uuid> --profile movie
-```
-
-Нарезать отобранное в файлы — горизонталь, вертикаль 1080×1920, превью
-и субтитры SRT/ASS:
-
-```bash
-docker compose exec worker-cpu python -m manage render --job-id <uuid> --enqueue
-```
-
-Подписать клипы заголовками, описаниями и хештегами:
-
-```bash
-docker compose exec worker-cpu python -m manage metadata --job-id <uuid>
+curl -N "http://localhost:8000/api/v1/jobs/<job_id>/status/stream" -H "X-API-Key: hg_..."
 ```
 
 Забрать результат — список клипов со ссылками на файлы:
@@ -199,6 +166,72 @@ curl "http://localhost:8000/api/v1/clips/<job_id>" -H "X-API-Key: hg_..."
 ```bash
 curl "http://localhost:8000/api/v1/download/<asset_id>?inline=true" -H "X-API-Key: hg_..." -o clip.mp4
 ```
+
+Перезапустить с этапа, ничего не пересчитывая до него:
+
+```bash
+curl -X POST "http://localhost:8000/api/v1/jobs/<job_id>/retry" -H "X-API-Key: hg_..." -H "Content-Type: application/json" -d '{"from_stage":"llm_rank"}'
+```
+
+Отменить выполняющийся:
+
+```bash
+curl -X DELETE "http://localhost:8000/api/v1/jobs/<job_id>" -H "X-API-Key: hg_..."
+```
+
+### Этапы по отдельности
+
+Тот же конвейер можно гонять по одному этапу — это нужно при отладке
+и при разборе того, что именно получилось:
+
+```bash
+docker compose exec worker-cpu python -m manage detect-scenes --video-id <uuid> --enqueue
+```
+
+```bash
+docker compose exec worker-cpu python -m manage transcribe --video-id <uuid> --enqueue
+```
+
+```bash
+docker compose exec worker-cpu python -m manage analyze --job-id <uuid> --groups audio,speech,vision
+```
+
+```bash
+docker compose exec worker-cpu python -m manage select --job-id <uuid> --profile movie
+```
+
+```bash
+docker compose exec worker-cpu python -m manage render --job-id <uuid> --enqueue
+```
+
+При первом анализе качаются веса — в том `models`, рядом с моделью
+распознавания речи: AudioSet-классификатор 331 МБ, SER 722 МБ, детектор
+людей 14 МБ, YuNet 256 КБ. Итого чуть больше гигабайта.
+
+Лишний анализатор отключается через `ANALYZERS_DISABLED` — например,
+`ANALYZERS_DISABLED=audio.events,vision.faces` убирает самые дорогие
+и возвращает этап к арифметике без нейросетей.
+
+Транскрипт целиком доступен отдельно:
+
+```bash
+curl "http://localhost:8000/api/v1/jobs/<job_id>/transcript?format=srt" -H "X-API-Key: hg_..."
+```
+
+### Наблюдаемость
+
+```bash
+docker compose --profile tools up -d prometheus grafana beat
+```
+
+- Метрики API: <http://localhost:8000/metrics>
+- Метрики воркера: <http://localhost:9100/metrics>
+- Prometheus: <http://localhost:9090>
+- Grafana: <http://localhost:3000> — дашборд «Highlight Generator — конвейер»
+  подключается сам, логин `admin` / `admin`
+
+Контейнер `beat` запускает уборку: раз в час удаляет артефакты с истёкшим
+сроком хранения, раз в десять минут снимает джобы, зависшие в `running`.
 
 По умолчанию всё крутится на процессоре: CPU-воркер слушает и очередь `gpu`,
 модель — `medium`. Час речи распознаётся примерно за 17 минут.

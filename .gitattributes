@@ -1,0 +1,28 @@
+# Концы строк.
+#
+# Репозиторий разрабатывается на Windows, а исполняется в Linux-контейнерах.
+# Без этого файла git отдаёт рабочей копии CRLF, и всё, что читает ядро
+# или интерпретатор построчно, ломается — молча и непонятно.
+#
+# Урок из практики: правка `docker/entrypoint.sh` из Python на Windows
+# записала его с CRLF, и контейнер ушёл в цикл перезапусков с сообщением
+# ``env: 'bash\r': No such file or directory``. Ядро честно искало
+# интерпретатор с именем «bash\r».
+
+* text=auto eol=lf
+
+# Файлы, которые обязаны быть LF независимо ни от чего: их читают
+# не редакторы, а загрузчик программ и docker.
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+*.Dockerfile    text eol=lf
+entrypoint.sh   text eol=lf
+
+# Двоичные — не трогать вовсе.
+*.mp4  binary
+*.mkv  binary
+*.mov  binary
+*.wav  binary
+*.jpg  binary
+*.png  binary
+*.onnx binary

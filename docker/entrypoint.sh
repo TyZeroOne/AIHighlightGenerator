@@ -2,7 +2,7 @@
 # Точка входа воркера. Один образ — несколько ролей, роль задаётся командой.
 set -euo pipefail
 
-QUEUES="${CELERY_QUEUES:-cpu,io}"
+QUEUES="${CELERY_QUEUES:-cpu,io,gpu,net}"
 CONCURRENCY="${CELERY_CONCURRENCY:-4}"
 LOGLEVEL="${LOG_LEVEL:-INFO}"
 

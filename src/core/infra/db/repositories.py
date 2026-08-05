@@ -9,13 +9,24 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.domain.entities import Asset, Clip, Job, Scene, UploadSession, User, Video
-from core.domain.enums import AssetKind, AssetOwnerType, JobStatus, VideoStatus
+from core.domain.entities import (
+    Asset,
+    Clip,
+    Job,
+    Scene,
+    StageState,
+    UploadSession,
+    User,
+    Video,
+    compute_progress,
+)
+from core.domain.enums import AssetKind, AssetOwnerType, JobStage, JobStatus, VideoStatus
 from core.domain.media import Transcript
 from core.infra.db.mappers import (
     asset_to_domain,
@@ -25,6 +36,7 @@ from core.infra.db.mappers import (
     job_to_orm_values,
     scene_to_domain,
     scene_to_orm_values,
+    stages_to_json,
     transcript_segment_to_domain,
     transcript_segment_to_orm_values,
     upload_session_to_domain,
@@ -266,6 +278,44 @@ class SqlAlchemyJobRepository:
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [job_to_domain(row) for row in rows]
+
+    async def write_stage(
+        self,
+        job_id: UUID,
+        stage: JobStage,
+        state: StageState,
+        *,
+        status: JobStatus,
+        error: dict[str, object] | None = None,
+    ) -> Job | None:
+        """Атомарно обновить состояние одного этапа.
+
+        ``SELECT ... FOR UPDATE`` — а не «прочитать, поменять, записать»
+        в питоне. Строка блокируется на время транзакции, и вторая ветка
+        конвейера ждёт, вместо того чтобы затереть чужую отметку своей
+        копией джоба, прочитанной десять минут назад.
+
+        Блокировка здесь дешёвая: транзакция состоит из одного чтения
+        и одной записи по первичному ключу, и держится микросекунды.
+        """
+        row = (
+            await self._session.execute(select(JobORM).where(JobORM.id == job_id).with_for_update())
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+
+        job = job_to_domain(row)
+        states = dict(job.stages)
+        states[stage] = state
+
+        row.stage_states = stages_to_json(states)
+        row.stage = stage
+        row.progress = Decimal(str(round(compute_progress(states), 2)))
+        row.status = status
+        if error is not None:
+            row.error = error
+        await self._session.flush()
+        return job_to_domain(row)
 
     async def update(self, job: Job) -> Job:
         values = job_to_orm_values(job)
