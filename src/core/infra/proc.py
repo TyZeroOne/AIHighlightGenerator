@@ -29,11 +29,12 @@ Linux умеет то, что нужно: ``prctl(PR_SET_PDEATHSIG, SIGKILL)`` �
 from __future__ import annotations
 
 import ctypes
+import os
 import platform
 from collections.abc import Callable
 from typing import Final
 
-__all__ = ["death_signal"]
+__all__ = ["cpu_share", "death_signal", "limit_native_threads"]
 
 #: Номер операции ``PR_SET_PDEATHSIG`` в ``prctl``. Константа из
 #: ``linux/prctl.h``; в стандартной библиотеке Python её нет.
@@ -62,3 +63,49 @@ def death_signal() -> Callable[[], None] | None:
         libc.prctl(_PR_SET_PDEATHSIG, _SIGKILL)
 
     return _set_pdeathsig
+
+
+def cpu_share(concurrency: int, cores: int | None = None) -> int:
+    """Сколько ядер отдать одному процессу пула.
+
+    Чистая арифметика, вынесенная отдельно, потому что ошибиться в ней
+    легко, а последствия неочевидны. Нагрузочный прогон Этапа 10 показал
+    их в чистом виде: четыре процесса пула, каждый со своим torch
+    и OpenCV, взяли по все двадцать ядер — **144 потока на 20 ядер**.
+    Процессор был загружен на 1992 %, а этап, занимающий в одиночку
+    17 секунд, не заканчивался десять минут: ядра ушли на переключение
+    контекста вместо работы.
+
+    Округление вниз, но не до нуля: при concurrency больше числа ядер
+    каждый процесс получает хотя бы одно, иначе библиотеки решат,
+    что ограничения нет.
+    """
+    total = cores or os.cpu_count() or 1
+    return max(total // max(concurrency, 1), 1)
+
+
+def limit_native_threads(threads: int) -> None:
+    """Ограничить пулы потоков библиотек внутри процесса.
+
+    Переменные окружения (``OMP_NUM_THREADS`` и родня) действуют, только
+    если выставлены **до** первого импорта numpy и torch, — поэтому их
+    место в entrypoint. Здесь — вторая линия: API, которые работают
+    и после загрузки библиотеки.
+
+    Обе линии нужны. Переменные покрывают BLAS и OpenMP, до которых
+    из питона не дотянуться; вызовы покрывают случай, когда переменные
+    забыли выставить, — например, при запуске воркера руками.
+    """
+    try:
+        import cv2
+
+        cv2.setNumThreads(threads)
+    except Exception:  # pragma: no cover — OpenCV может отсутствовать
+        pass
+
+    try:
+        import torch
+
+        torch.set_num_threads(threads)
+    except Exception:  # pragma: no cover — torch может отсутствовать
+        pass

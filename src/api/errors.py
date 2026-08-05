@@ -59,12 +59,20 @@ def install_error_handlers(app: FastAPI) -> None:
     async def _domain_error(request: Request, exc: HighlightError) -> JSONResponse:
         # Ожидаемые ошибки логируем как warning: это не сбой системы,
         # а штатный отказ. Сбои (500) пойдут ниже, через _unhandled.
+        #
+        # Контекст уходит одним полем, а не распакованным в аргументы.
+        # Распаковка выглядела аккуратнее ровно до первой ошибки, в чьём
+        # контексте оказался ключ `status`: `log.warning(..., status=...,
+        # **{"status": ...})` — это `TypeError`, и обработчик ошибок
+        # падал сам, превращая честный 400 в 500. Отказ обработчика
+        # отказов — худшее место для такой находки, и нашлась она
+        # тестом на отмену уже завершённого джоба.
         log.warning(
             "api.domain_error",
             code=exc.code,
             status=exc.http_status,
             detail=exc.message,
-            **exc.context,
+            context=exc.context,
         )
         return problem_response(
             request,

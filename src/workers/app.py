@@ -183,10 +183,21 @@ def _init_worker_process(**_: Any) -> None:
     модель на GPU), либо ломается, либо дублируется в каждом процессе.
     """
     configure_logging(level=settings.log_level, fmt=settings.log_format)
+
+    # Ограничиваем потоки библиотек до того, как их кто-то использует.
+    # Без этого каждый процесс пула берёт себе все ядра: нагрузочный
+    # прогон Этапа 10 дал 144 потока на 20 ядер, загрузку 1992 % и этап,
+    # который в одиночку идёт 17 секунд, а вчетвером — десять минут.
+    from core.infra.proc import cpu_share, limit_native_threads
+
+    concurrency = int(os.environ.get("CELERY_CONCURRENCY", "4") or 4)
+    threads = cpu_share(concurrency)
+    limit_native_threads(threads)
+
     from core.container import get_container
 
     get_container()
-    log.info("worker.process_initialized")
+    log.info("worker.process_initialized", native_threads=threads)
 
 
 @worker_process_shutdown.connect

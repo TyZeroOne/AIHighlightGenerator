@@ -35,7 +35,12 @@ from uuid import UUID, uuid4
 
 from core.domain.entities import Job, StageState, User, Video, compute_progress
 from core.domain.enums import STAGE_ORDER, JobStage, JobStatus
-from core.domain.errors import NotFoundError, QuotaExceededError, ValidationError
+from core.domain.errors import (
+    ConflictError,
+    NotFoundError,
+    QuotaExceededError,
+    ValidationError,
+)
 from core.domain.params import AnalysisParams
 from core.logging import get_logger
 from core.ports.repository import UnitOfWork, UnitOfWorkFactory
@@ -218,10 +223,14 @@ class CancelJob:
             if job is None or job.user_id != user_id:
                 raise NotFoundError("Джоб не найден", job_id=str(job_id))
             if job.status.is_terminal:
-                raise ValidationError(
+                # 409, а не 422: с запросом всё в порядке, не в порядке
+                # состояние ресурса. Разница видна клиенту — 422 он поймёт
+                # как «поправь параметры» и будет их править, хотя править
+                # нечего.
+                raise ConflictError(
                     f"Джоб уже завершён со статусом {job.status.value}",
                     job_id=str(job_id),
-                    status=job.status.value,
+                    job_status=job.status.value,
                 )
 
             # Статус пишется ДО отзыва задачи. Порядок важен: выполняющаяся
