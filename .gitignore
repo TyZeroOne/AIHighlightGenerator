@@ -16,6 +16,7 @@ htmlcov/
 # Секреты и локальное окружение
 .env
 .env.local
+.claude/
 
 # Данные и артефакты
 media/
